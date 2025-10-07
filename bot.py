@@ -1,641 +1,231 @@
-# bot.py - финальная версия: регистрация, временное хранилище, чек-лист, удаление временных файлов
 import os
 import json
-import time
-import logging
+import shutil
+import asyncio
 from datetime import datetime
-from typing import Dict, Any, List, Optional
-
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    BotCommand,
-)
+from pathlib import Path
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
+    ContextTypes,
     CommandHandler,
     MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
+    ConversationHandler,
     filters,
 )
 
-# ---------- Настройки ----------
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger(__name__)
-
-TOKEN = os.getenv("BOT_TOKEN")
-BASE_DIR = os.getenv("DATA_DIR", "data")  # по умолчанию "./data"
-USERS_PATH = os.path.join(BASE_DIR, "users.json")
-
-# чеклист: ключ папки => описание (как ты подтвердил)
+# --- Настройки ---
+DATA_DIR = Path("data")
+USERS_FILE = DATA_DIR / "users.json"
 CHECKLIST = [
-    ("photo_old_meter", "Фото заменяемого счётчика"),
-    ("photo_old_seals", "Фото пломб старого счётчика"),
-    ("photo_new_meter", "Фото нового счётчика"),
-    ("photo_new_seals", "Фото пломб нового счётчика"),
-    ("photo_passport", "Фото паспорта нового счётчика"),
-    ("photo_after_install", "Фото после монтажа"),
-    ("video_leak_test", "Видео проверки герметичности"),
+    "Фото заменяемого счётчика",
+    "Фото пломб старого счётчика",
+    "Фото нового счётчика",
+    "Фото пломб нового счётчика",
+    "Фото паспорта нового счётчика",
+    "Фото после монтажа",
+    "Видео проверки герметичности"
 ]
 
-# ---------- Внутренние структуры ----------
-# awaiting_object: user_id -> {"action": "object", "chat_id": int, "prompt_msg": (chat_id,msg_id)}
-awaiting_object: Dict[int, Dict[str, Any]] = {}
+DATA_DIR.mkdir(exist_ok=True)
+if not USERS_FILE.exists():
+    USERS_FILE.write_text("{}")
+with open(USERS_FILE, "r", encoding="utf-8") as f:
+    USERS = json.load(f)
 
-# awaiting_registration: user_id -> {"chat_id": int, "prompt_msg": (chat_id,msg_id)}
-awaiting_registration: Dict[int, Dict[str, Any]] = {}
+REGISTER, OBJECT, FILE_UPLOAD = range(3)
+SESSIONS = {}
 
-# user_sessions: user_id -> session
-# session:
-#   object_id: str
-#   pending_item: Optional[str]
-#   checklist_msg: (chat_id,message_id)
-#   bot_messages: list of (chat_id,message_id)  # temporary bot messages to delete later
-user_sessions: Dict[int, Dict[str, Any]] = {}
+def save_users():
+    with open(USERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(USERS, f, ensure_ascii=False, indent=2)
 
-os.makedirs(BASE_DIR, exist_ok=True)
+def normalize_name(name: str) -> str:
+    return " ".join(part.upper() for part in name.strip().split())
 
+def extract_phone(text: str) -> str:
+    digits = "".join(c for c in text if c.isdigit())
+    if len(digits) == 10:
+        digits = "7" + digits
+    return "+" + digits if digits else None
 
-# ---------- Пользователи (users.json) ----------
-def load_users() -> dict:
-    if not os.path.exists(USERS_PATH):
-        return {}
+def create_object_dir(object_number: str) -> Path:
+    obj_dir = DATA_DIR / f"объект_{object_number}"
+    obj_dir.mkdir(parents=True, exist_ok=True)
+    return obj_dir
+
+async def delete_message_later(context: ContextTypes.DEFAULT_TYPE, chat_id, message_id, delay=1):
+    await asyncio.sleep(delay)
     try:
-        with open(USERS_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        log.exception("Не удалось прочитать users.json: %s", e)
-        return {}
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except:
+        pass
 
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id not in USERS:
+        await update.message.reply_text(
+            "Привет! Для работы с ботом нужно зарегистрироваться.\n"
+            "Пожалуйста, отправьте свои данные в формате: ФИО, телефон"
+        )
+        return REGISTER
+    else:
+        await update.message.reply_text(
+            "Привет! Вы уже зарегистрированы. Используйте /object для начала загрузки файлов."
+        )
+        return ConversationHandler.END
 
-def save_users(d: dict):
-    os.makedirs(os.path.dirname(USERS_PATH), exist_ok=True)
-    with open(USERS_PATH, "w", encoding="utf-8") as f:
-        json.dump(d, f, ensure_ascii=False, indent=2)
+async def register(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    text = update.message.text
 
+    phone = extract_phone(text)
+    name_part = text.replace(phone[-10:], "").replace(",", "").strip() if phone else text
+    full_name = normalize_name(name_part)
 
-def is_registered(user_id: int) -> bool:
-    users = load_users()
-    return str(user_id) in users
+    if not phone:
+        await update.message.reply_text("Не удалось распознать номер телефона. Попробуйте снова.")
+        return REGISTER
 
-
-def register_user(user_id: int, full_name: str, phone: str, tg_user: Dict[str, Any]):
-    users = load_users()
-    users[str(user_id)] = {
+    USERS[user_id] = {
         "full_name": full_name,
         "phone": phone,
-        "username": tg_user.get("username"),
-        "first_name": tg_user.get("first_name"),
-        "last_name": tg_user.get("last_name"),
-        "registered_at": datetime.utcnow().isoformat()
+        "username": update.effective_user.username,
+        "first_name": update.effective_user.first_name,
+        "last_name": update.effective_user.last_name,
+        "registered_at": datetime.now().isoformat()
     }
-    save_users(users)
+    save_users()
+    await update.message.reply_text(f"Регистрация успешна ✅\nПривет, {full_name}!")
+    return ConversationHandler.END
 
+async def object_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id not in USERS:
+        await update.message.reply_text("Сначала зарегистрируйтесь командой /start.")
+        return ConversationHandler.END
 
-def get_user_display(user_id: int) -> str:
-    users = load_users()
-    u = users.get(str(user_id))
-    if u:
-        return f"{u.get('full_name')} ({u.get('phone')})"
-    return None
+    await update.message.reply_text("Введите номер объекта:")
+    return OBJECT
 
+async def receive_object_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    object_number = update.message.text.strip()
+    SESSIONS[user_id] = {
+        "object_number": object_number,
+        "checklist_index": 0,
+        "files": {step: [] for step in CHECKLIST},
+        "msg_ids_to_delete": []
+    }
+    await send_next_checklist_step(update, context, user_id)
+    return FILE_UPLOAD
 
-# ---------- Файловая структура и метаданные ----------
-def object_dir(object_id: str) -> str:
-    return os.path.join(BASE_DIR, f"object_{object_id}")
-
-
-def metadata_path(obj_dir: str) -> str:
-    return os.path.join(obj_dir, "metadata.json")
-
-
-def load_metadata(obj_dir: str) -> dict:
-    p = metadata_path(obj_dir)
-    if os.path.exists(p):
-        try:
-            with open(p, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            log.exception("Ошибка чтения metadata.json: %s", e)
-            return {"files": {}}
-    md = {"files": {k: [] for k, _ in CHECKLIST}, "created_at": int(time.time())}
-    return md
-
-
-def save_metadata(obj_dir: str, md: dict):
-    p = metadata_path(obj_dir)
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(md, f, ensure_ascii=False, indent=2)
-
-
-def ensure_object_dirs(obj_dir: str):
-    os.makedirs(obj_dir, exist_ok=True)
-    for key, _ in CHECKLIST:
-        os.makedirs(os.path.join(obj_dir, key), exist_ok=True)
-
-
-# ---------- Вспомогательные функции ----------
-def record_bot_message(session: Dict[str, Any], chat_id: int, msg_id: int):
-    if session is None:
-        return
-    session.setdefault("bot_messages", []).append((chat_id, msg_id))
-
-
-async def safe_delete(bot, chat_id: int, msg_id: int):
-    try:
-        await bot.delete_message(chat_id=chat_id, message_id=msg_id)
-    except Exception:
-        pass
-
-
-def build_checklist_text_and_keyboard(obj_id: str):
-    obj_dir = object_dir(obj_id)
-    md = load_metadata(obj_dir)
-    text_lines = [f"Объект {obj_id}\nЧек-лист по файлам:\n"]
-    buttons = []
-    for key, title in CHECKLIST:
-        got = bool(md.get("files", {}).get(key))
-        mark = "✅" if got else "❌"
-        text_lines.append(f"{mark} {title}")
-        buttons.append(InlineKeyboardButton(f"{mark} {title}", callback_data=f"choose|{key}"))
-    keyboard = [[b] for b in buttons]
-    keyboard.append([
-        InlineKeyboardButton("✅ Завершить загрузку", callback_data="finish"),
-        InlineKeyboardButton("❌ Отмена", callback_data="cancel")
-    ])
-    return "\n".join(text_lines), InlineKeyboardMarkup(keyboard)
-
-
-# ---------- Обработчики команд и сообщений ----------
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = (
-        "Привет! Я помогу загрузить файлы по объектам и автоматически выложить их в чат.\n\n"
-        "Команды:\n"
-        "/object — начать загрузку (в следующем сообщении укажи номер объекта)\n"
-        "/register — зарегистрировать ФИО и телефон (если ещё не сделал(а))\n"
-        "/cancel — отменить текущую сессию\n\n"
-        "Пример: отправь `/object`, затем в следующем сообщении `15`."
-    )
-    await update.message.reply_text(txt)
-
-
-async def cmd_register(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /register — начать процесс регистрации (ожидаем следующего сообщения с 'ФИО, +7999...')"""
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    prompt = await update.message.reply_text("Пожалуйста, отправьте в следующем сообщении свои данные в формате:\nИванов Иван Иванович, +79998887766")
-    awaiting_registration[user_id] = {"chat_id": chat_id, "prompt_msg": (prompt.chat_id, prompt.message_id)}
-    # удалим командное сообщение (по желанию) — не обязательно
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
-
-
-async def cmd_object(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Шаг 1: /object — ждём следующий текст с номером объекта"""
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-
-    # Если пользователь не зарегистрирован — попросим зарегистрироваться
-    if not is_registered(user_id):
-        prompt = await update.message.reply_text("Вам нужно зарегистрироваться перед загрузкой. Отправьте /register или пришлите в ответ ФИО и телефон в формате:\nИванов Иван Иванович, +79998887766")
-        awaiting_registration[user_id] = {"chat_id": chat_id, "prompt_msg": (prompt.chat_id, prompt.message_id)}
-        try:
-            await update.message.delete()
-        except Exception:
-            pass
-        return
-
-    prompt = await update.message.reply_text("Введите номер объекта (например: 15).")
-    awaiting_object[user_id] = {"action": "object", "chat_id": chat_id, "prompt_msg": (prompt.chat_id, prompt.message_id)}
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
-
-
-async def handle_text_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатываем текстовые сообщения как регистрацию или как номер объекта (если ожидается)."""
-    user_id = update.effective_user.id
-    text = (update.message.text or "").strip()
-    if not text:
-        return
-
-    # 1) Если ожидается регистрация — принимаем
-    reg = awaiting_registration.pop(user_id, None)
-    if reg:
-        # Ожидаем формат: "ФИО, +7999..." (но не строго — попытаемся распарсить)
-        parts = [p.strip() for p in text.split(",")]
-        if len(parts) >= 2:
-            full_name = parts[0]
-            phone = parts[1]
-            register_user(user_id, full_name, phone, {
-                "username": update.effective_user.username,
-                "first_name": update.effective_user.first_name,
-                "last_name": update.effective_user.last_name
-            })
-            # ответим пользователю (в том чате, где он ответил)
-            reply = await update.message.reply_text("Спасибо! Вы зарегистрированы ✅")
-            # удалим prompt о регистрации и сообщение пользователя
-            try:
-                if reg.get("prompt_msg"):
-                    await context.bot.delete_message(chat_id=reg["prompt_msg"][0], message_id=reg["prompt_msg"][1])
-            except Exception:
-                pass
-            try:
-                await update.message.delete()
-            except Exception:
-                pass
-            # удалим ответ-уведомление бота через небольшую задержку ( опционально ). здесь оставляем его недолго
-            # (мы не сохраняем его id — оно автоматически исчезнет по таймауту, но можно удалить)
-            return
-        else:
-            # неверный формат — попросим повторить
-            awaiting_registration[user_id] = reg  # вернуть ожидание
-            warn = await update.message.reply_text("Неправильный формат. Пожалуйста, пришлите: Иванов Иван Иванович, +79998887766")
-            try:
-                await update.message.delete()
-            except Exception:
-                pass
-            # удалим предупреждение через пару секунд (необязательно) — но чтобы не засорять чат, удалим через 8 сек
-            try:
-                await context.bot.delete_message(chat_id=warn.chat_id, message_id=warn.message_id)
-            except Exception:
-                pass
-            return
-
-    # 2) Если ожидали номер объекта — обрабатываем
-    pending = awaiting_object.pop(user_id, None)
-    if pending:
-        action = pending.get("action")
-        chat_id = pending.get("chat_id")
-        prompt_msg = pending.get("prompt_msg")
-        obj_id = text.split()[0]
-        if not obj_id.isdigit():
-            # неверный формат — попросим ввести только цифры (и вернём ожидание)
-            awaiting_object[user_id] = pending
-            warn = await update.message.reply_text("Неверный формат номера объекта. Введите, пожалуйста, только цифры, например: 15")
-            try:
-                await update.message.delete()
-            except Exception:
-                pass
-            # удалим предупреждение через пару сек
-            try:
-                await context.bot.delete_message(chat_id=warn.chat_id, message_id=warn.message_id)
-            except Exception:
-                pass
-            return
-
-        # создаём сессию загрузки
-        obj_dir = object_dir(obj_id)
-        ensure_object_dirs(obj_dir)
-        md = load_metadata(obj_dir)
-        save_metadata(obj_dir, md)
-
-        session = {
-            "object_id": obj_id,
-            "pending_item": None,
-            "checklist_msg": None,
-            "bot_messages": [],
-            "created_at": int(time.time())
-        }
-        user_sessions[user_id] = session
-
-        text_msg, markup = build_checklist_text_and_keyboard(obj_id)
-        sent = await context.bot.send_message(chat_id=chat_id, text=text_msg, reply_markup=markup)
-        session["checklist_msg"] = (sent.chat_id, sent.message_id)
-        record_bot_message(session, sent.chat_id, sent.message_id)
-
-        # удаляем prompt (от /object) и сообщение пользователя с номером
-        try:
-            if prompt_msg:
-                await context.bot.delete_message(chat_id=prompt_msg[0], message_id=prompt_msg[1])
-        except Exception:
-            pass
-        try:
-            await update.message.delete()
-        except Exception:
-            pass
-        return
-
-    # 3) Обычный текст — ничего не делаем
-    return
-
-
-async def choose_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка чек-листа: выбор пункта / finish / cancel."""
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    session = user_sessions.get(user_id)
-    if not session:
-        await query.message.reply_text("Сессия не найдена. Начните с /object <номер>.")
-        return
-    data = query.data
-    if data.startswith("choose|"):
-        key = data.split("|", 1)[1]
-        valid_keys = [k for k, _ in CHECKLIST]
-        if key not in valid_keys:
-            await query.message.reply_text("Неправильный пункт чек-листа.")
-            return
-        session["pending_item"] = key
-        item_title = dict(CHECKLIST)[key]
-        sent = await query.message.reply_text(
-            f"Отправьте файл(ы) для: {item_title}\n"
-            "Можно отправлять несколько сообщений (фото/видео/документы).\n"
-            "Когда всё отправите — нажмите '✅ Завершить загрузку'."
+async def send_next_checklist_step(update, context, user_id):
+    session = SESSIONS[user_id]
+    idx = session["checklist_index"]
+    if idx >= len(CHECKLIST):
+        msg = await update.message.reply_text(
+            "✅ Все пункты чек-листа пройдены. Нажмите '✅ Завершить загрузку', чтобы отправить файлы.",
+            reply_markup=ReplyKeyboardMarkup([["✅ Завершить загрузку"], ["❌ Отмена"]], resize_keyboard=True)
         )
-        record_bot_message(session, sent.chat_id, sent.message_id)
-    elif data == "finish":
-        await handle_finish_by_user(user_id, query.message.chat_id, context)
-    elif data == "cancel":
-        await cleanup_session(user_id, context, notify=True)
+        session["msg_ids_to_delete"].append(msg.message_id)
+        return
+
+    step_name = CHECKLIST[idx]
+    msg = await update.message.reply_text(
+        f"Отправьте файл(ы) для: {step_name}\n"
+        "Можно отправлять несколько сообщений (фото/видео/документы).\n"
+        "Когда всё отправите — нажмите '✅ Завершить загрузку'."
+    )
+    session["msg_ids_to_delete"].append(msg.message_id)
+
+async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id not in SESSIONS:
+        await update.message.reply_text("Сначала выберите объект командой /object.")
+        return
+
+    session = SESSIONS[user_id]
+    idx = session["checklist_index"]
+    if idx >= len(CHECKLIST):
+        return
+
+    step_name = CHECKLIST[idx]
+    files_dir = create_object_dir(session["object_number"]) / step_name
+    files_dir.mkdir(parents=True, exist_ok=True)
+
+    if update.message.photo:
+        file_obj = update.message.photo[-1].get_file()
+        file_path = files_dir / f"{file_obj.file_id}.jpg"
+        await file_obj.download_to_drive(custom_path=file_path)
+        session["files"][step_name].append(file_path)
+    elif update.message.document:
+        file_obj = update.message.document.get_file()
+        file_path = files_dir / update.message.document.file_name
+        await file_obj.download_to_drive(custom_path=file_path)
+        session["files"][step_name].append(file_path)
+    elif update.message.video:
+        file_obj = update.message.video.get_file()
+        file_path = files_dir / f"{file_obj.file_id}.mp4"
+        await file_obj.download_to_drive(custom_path=file_path)
+        session["files"][step_name].append(file_path)
     else:
-        await query.message.reply_text("Неизвестная команда.")
-
-
-async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Сохраняем файл во временную папку, удаляем исходное сообщение, обновляем чек-лист."""
-    msg = update.message
-    user_id = msg.from_user.id
-    session = user_sessions.get(user_id)
-    if not session:
-        # запрос регистрации/инструкции
-        warn = await msg.reply_text("Сначала начните с /object, затем в следующем сообщении введите номер объекта.")
-        try:
-            await context.bot.delete_message(chat_id=warn.chat_id, message_id=warn.message_id)
-        except Exception:
-            pass
-        try:
-            await msg.delete()
-        except Exception:
-            pass
         return
 
-    pending = session.get("pending_item")
-    if not pending:
-        # просим выбрать пункт чек-листа
-        obj_id = session.get("object_id")
-        text_msg, markup = build_checklist_text_and_keyboard(obj_id)
-        sent = await msg.reply_text("Пожалуйста, сначала нажмите кнопку чек-листа — для какого пункта вы загружаете файл.", reply_markup=markup)
-        record_bot_message(session, sent.chat_id, sent.message_id)
-        try:
-            await msg.delete()
-        except Exception:
-            pass
-        return
+    msg = await update.message.reply_text(f"Файл сохранён для '{step_name}'")
+    await delete_message_later(context, msg.chat_id, msg.message_id, delay=1)
+    await delete_message_later(context, update.message.chat_id, update.message.message_id, delay=1)
 
-    obj_id = session.get("object_id")
-    obj_dir = object_dir(obj_id)
-    ensure_object_dirs(obj_dir)
-    md = load_metadata(obj_dir)
+async def finish_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id not in SESSIONS:
+        await update.message.reply_text("Сначала выберите объект командой /object.")
+        return ConversationHandler.END
 
-    # Получаем файл
-    file_obj = None
-    file_type = None
-    original_name = None
-    try:
-        if msg.photo:
-            file_obj = await msg.photo[-1].get_file()
-            file_type = "photo"
-            ext = "jpg"
-            original_name = f"{file_obj.file_unique_id}.{ext}"
-        elif msg.video:
-            file_obj = await msg.video.get_file()
-            file_type = "video"
-            original_name = getattr(msg.video, "file_name", f"{file_obj.file_unique_id}.mp4")
-        elif msg.document:
-            file_obj = await msg.document.get_file()
-            file_type = "document"
-            original_name = getattr(msg.document, "file_name", None) or f"{file_obj.file_unique_id}.dat"
-        else:
-            # не распознано
-            try:
-                await msg.delete()
-            except Exception:
-                pass
-            return
-    except Exception as e:
-        log.exception("Ошибка получения файла: %s", e)
-        try:
-            await msg.delete()
-        except Exception:
-            pass
-        return
+    session = SESSIONS[user_id]
+    object_number = session["object_number"]
+    user_data = USERS.get(user_id)
+    sender_info = f"{user_data['full_name']} ({user_data['phone']})" if user_data else f"ID {user_id}"
 
-    # Сохраняем файл временно
-    timestamp = int(time.time())
-    safe_name = original_name.replace(" ", "_")
-    filename = f"{timestamp}_{file_obj.file_unique_id}_{safe_name}"
-    save_folder = os.path.join(obj_dir, pending)
-    os.makedirs(save_folder, exist_ok=True)
-    save_path = os.path.join(save_folder, filename)
-    try:
-        await file_obj.download_to_drive(custom_path=save_path)
-    except TypeError:
-        await file_obj.download_to_drive(save_path)
-    except Exception as e:
-        log.exception("Ошибка сохранения файла: %s", e)
-        try:
-            await msg.delete()
-        except Exception:
-            pass
-        return
-
-    # Сохраняем запись в metadata
-    entry = {
-        "filename": os.path.relpath(save_path, obj_dir),
-        "uploader_id": user_id,
-        "uploader_name": get_user_display(user_id) or msg.from_user.full_name or "",
-        "ts": timestamp,
-        "file_type": file_type,
-        "original_name": original_name,
-    }
-    md.setdefault("files", {})
-    md["files"].setdefault(pending, []).append(entry)
-    save_metadata(obj_dir, md)
-
-    # Удаляем исходное сообщение пользователя (чтобы не засорять группу)
-    try:
-        await msg.delete()
-    except Exception:
-        pass
-
-    # Обновляем чек-лист (редактируем основное сообщение бота)
-    checklist = session.get("checklist_msg")
-    if checklist:
-        chat_id, msg_id = checklist
-        text_msg, markup = build_checklist_text_and_keyboard(obj_id)
-        try:
-            await context.bot.edit_message_text(text=text_msg, chat_id=chat_id, message_id=msg_id, reply_markup=markup)
-        except Exception:
-            pass
-
-    # уведомление о сохранении (и записываем его id, чтобы удалить позже)
-    notif = await context.bot.send_message(chat_id=msg.chat_id, text=f"Файл сохранён для '{dict(CHECKLIST)[pending]}' (Объект {obj_id}).")
-    record_bot_message(session, notif.chat_id, notif.message_id)
-
-
-async def handle_finish_by_user(user_id: int, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Формируем агрегированный отчёт, отправляем файлы, затем удаляем временные файлы и служебные сообщения."""
-    session = user_sessions.get(user_id)
-    if not session:
-        await context.bot.send_message(chat_id=chat_id, text="Сессия не найдена.")
-        return
-
-    obj_id = session.get("object_id")
-    obj_dir = object_dir(obj_id)
-    md = load_metadata(obj_dir)
-
-    # Подпись загрузчика: стараемся брать из users.json, иначе использовать tg name
-    uploader_display = get_user_display(user_id) or (context.bot.get_chat_member(chat_id=user_id).user.full_name if False else None)
-    # (выше: context.bot.get_chat_member не всегда сработает; мы уже записали uploader_name в entry)
-
-    summary_msg = await context.bot.send_message(chat_id=chat_id, text=f"Собираю файлы по Объекту {obj_id}...")
-    record_bot_message(session, summary_msg.chat_id, summary_msg.message_id)
-
-    any_files = False
-    # Отправляем сгруппировано
-    for key, title in CHECKLIST:
-        files = md.get("files", {}).get(key, [])
-        if not files:
+    chat_id = update.message.chat_id
+    for step_name, files_list in session["files"].items():
+        if not files_list:
             continue
-        any_files = True
-        header_msg = await context.bot.send_message(chat_id=chat_id, text=f"🔹 {title}:")
-        record_bot_message(session, header_msg.chat_id, header_msg.message_id)
-        for entry in files:
-            path = os.path.join(obj_dir, entry["filename"])
-            caption = f"Объект {obj_id} — {title}\nОтправил: {entry.get('uploader_name','(неизвестно)')} — {datetime.fromtimestamp(entry['ts']).strftime('%Y-%m-%d %H:%M')}"
-            try:
-                if entry["file_type"] == "photo":
-                    await context.bot.send_photo(chat_id=chat_id, photo=open(path, "rb"), caption=caption)
-                elif entry["file_type"] == "video":
-                    await context.bot.send_video(chat_id=chat_id, video=open(path, "rb"), caption=caption)
-                else:
-                    await context.bot.send_document(chat_id=chat_id, document=open(path, "rb"), caption=caption)
-            except Exception as e:
-                log.exception("Ошибка отправки файла: %s", e)
-                err = await context.bot.send_message(chat_id=chat_id, text=f"Не удалось отправить файл {entry.get('original_name')}")
-                record_bot_message(session, err.chat_id, err.message_id)
+        await context.bot.send_message(chat_id, f"**{step_name}:**", parse_mode="Markdown")
+        for file_path in files_list:
+            with open(file_path, "rb") as f:
+                await context.bot.send_document(chat_id, f, caption=f"Объект {object_number}\nЗагружено: {sender_info}")
 
-    if not any_files:
-        none_msg = await context.bot.send_message(chat_id=chat_id, text="Файлы для этого объекта не найдены.")
-        record_bot_message(session, none_msg.chat_id, none_msg.message_id)
-    else:
-        done_msg = await context.bot.send_message(chat_id=chat_id, text="Готово — файлы сгруппированы и выведены в чат.")
-        record_bot_message(session, done_msg.chat_id, done_msg.message_id)
+    shutil.rmtree(create_object_dir(object_number), ignore_errors=True)
+    await update.message.reply_text(f"Загрузка для объекта {object_number} завершена ✅")
+    del SESSIONS[user_id]
+    return ConversationHandler.END
 
-    # После успешной отправки — удаляем временные локальные файлы для этого объекта
-    try:
-        # удаляем весь obj_dir целиком
-        import shutil
-        shutil.rmtree(obj_dir, ignore_errors=True)
-    except Exception as e:
-        log.exception("Ошибка при удалении временных файлов: %s", e)
+async def cancel_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id in SESSIONS:
+        shutil.rmtree(create_object_dir(SESSIONS[user_id]["object_number"]), ignore_errors=True)
+        del SESSIONS[user_id]
+    await update.message.reply_text("Загрузка отменена ❌")
+    return ConversationHandler.END
 
-    # Удаляем все служебные сообщения бота, связанные с сессией (но НЕ удаляем сгруппированные сообщения с файлами,
-    # потому что это финальный отчёт, который мы хотим оставить в чате). Мы записывали только временные сообщения
-    # (prompts, notifications, чек-лист).
-    bot_msgs: List[Any] = session.get("bot_messages", []) or []
-    for (c, m_id) in bot_msgs:
-        try:
-            await safe_delete(context.bot, c, m_id)
-        except Exception:
-            pass
+app = ApplicationBuilder().token(os.environ.get("TOKEN")).build()
 
-    # Попробуем удалить чек-лист
-    checklist = session.get("checklist_msg")
-    if checklist:
-        try:
-            await safe_delete(context.bot, checklist[0], checklist[1])
-        except Exception:
-            pass
+conv_handler = ConversationHandler(
+    entry_points=[CommandHandler("start", start), CommandHandler("object", object_choice)],
+    states={
+        REGISTER: [MessageHandler(filters.TEXT & ~filters.COMMAND, register)],
+        OBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_object_number)],
+        FILE_UPLOAD: [
+            MessageHandler(filters.ALL & ~filters.COMMAND, handle_files),
+            MessageHandler(filters.Regex("✅ Завершить загрузку"), finish_upload),
+            MessageHandler(filters.Regex("❌ Отмена"), cancel_upload)
+        ],
+    },
+    fallbacks=[CommandHandler("cancel", cancel_upload)],
+)
 
-    # Закрываем сессию
-    user_sessions.pop(user_id, None)
+app.add_handler(conv_handler)
 
-
-async def cleanup_session(user_id: int, context: ContextTypes.DEFAULT_TYPE, notify: bool = True):
-    """Отмена сессии: удаляем временные сообщения и директории (если нужно)"""
-    session = user_sessions.get(user_id)
-    if not session:
-        # уведомим, если нужно
-        if notify:
-            await context.bot.send_message(chat_id=context.bot.id, text="Сессия не найдена.")
-        return
-
-    # удаляем временные сообщения
-    bot_msgs: List[Any] = session.get("bot_messages", []) or []
-    for (c, m_id) in bot_msgs:
-        try:
-            await safe_delete(context.bot, c, m_id)
-        except Exception:
-            pass
-    # удаляем чек-лист
-    checklist = session.get("checklist_msg")
-    if checklist:
-        try:
-            await safe_delete(context.bot, checklist[0], checklist[1])
-        except Exception:
-            pass
-    # удаляем временную папку с файлами (можно держать или удалять — по требованию удалим)
-    obj_id = session.get("object_id")
-    if obj_id:
-        try:
-            import shutil
-            shutil.rmtree(object_dir(obj_id), ignore_errors=True)
-        except Exception:
-            pass
-    # удаляем сессию
-    user_sessions.pop(user_id, None)
-    if notify:
-        # отправим краткое подтверждение в чат (попытка — иногда бот не может)
-        try:
-            await context.bot.send_message(chat_id=checklist[0] if checklist else context.bot.id, text="Сессия отменена.")
-        except Exception:
-            pass
-
-
-# ---------- Инициализация ----------
-def main():
-    if not TOKEN:
-        log.error("BOT_TOKEN не задан. Установите переменную окружения BOT_TOKEN.")
-        return
-
-    app = ApplicationBuilder().token(TOKEN).build()
-
-    # Регистрация команд
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("register", cmd_register))
-    app.add_handler(CommandHandler("object", cmd_object))
-    app.add_handler(CommandHandler("cancel", lambda u, c: cleanup_session(u.effective_user.id, c)))
-
-    # Хендлеры
-    app.add_handler(CallbackQueryHandler(choose_callback))
-    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, handle_file))
-    # Текстовые сообщения: для регистрации и ввода номера объекта
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text_next))
-
-    # Устанавливаем видимые команды в меню
-    try:
-        import asyncio
-        cmds = [
-            BotCommand("start", "Приветствие и инструкция"),
-            BotCommand("object", "Начать загрузку — далее в следующем сообщении укажи номер объекта"),
-            BotCommand("register", "Зарегистрировать ФИО и телефон"),
-            BotCommand("cancel", "Отменить текущую сессию"),
-        ]
-        asyncio.get_event_loop().run_until_complete(app.bot.set_my_commands(cmds))
-    except Exception as e:
-        log.warning("Не удалось установить команды: %s", e)
-
-    log.info("Starting bot...")
-    app.run_polling()
-
-
-if __name__ == "__main__":
-    main()
+print("Бот запущен…")
+app.run_polling()
