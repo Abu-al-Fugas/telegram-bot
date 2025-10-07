@@ -1,93 +1,67 @@
 import os
 import json
-import shutil
 import asyncio
 from datetime import datetime
 from pathlib import Path
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    ContextTypes,
-    CommandHandler,
-    MessageHandler,
-    ConversationHandler,
-    filters,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
-# --- Настройки ---
+# Путь для хранения временных файлов
 DATA_DIR = Path("data")
 USERS_FILE = DATA_DIR / "users.json"
+DATA_DIR.mkdir(exist_ok=True)
+if not USERS_FILE.exists():
+    USERS_FILE.write_text("{}")
+
+# Чек-лист файлов
 CHECKLIST = [
-    "Фото заменяемого счётчика",
-    "Фото пломб старого счётчика",
-    "Фото нового счётчика",
-    "Фото пломб нового счётчика",
-    "Фото паспорта нового счётчика",
+    "Фото заменяемого счетчика",
+    "Фото пломб старого счетчика",
+    "Фото нового счетчика",
+    "Фото пломб нового счетчика",
+    "Фото паспорта нового счетчика",
     "Фото после монтажа",
     "Видео проверки герметичности"
 ]
 
-DATA_DIR.mkdir(exist_ok=True)
-if not USERS_FILE.exists():
-    USERS_FILE.write_text("{}")
-with open(USERS_FILE, "r", encoding="utf-8") as f:
-    USERS = json.load(f)
+# Хранение состояния каждого пользователя
+user_sessions = {}
 
-REGISTER, OBJECT, FILE_UPLOAD = range(3)
-SESSIONS = {}
+def load_users():
+    with open(USERS_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-def save_users():
+def save_users(users):
     with open(USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(USERS, f, ensure_ascii=False, indent=2)
-
-def normalize_name(name: str) -> str:
-    return " ".join(part.upper() for part in name.strip().split())
-
-def extract_phone(text: str) -> str:
-    digits = "".join(c for c in text if c.isdigit())
-    if len(digits) == 10:
-        digits = "7" + digits
-    return "+" + digits if digits else None
-
-def create_object_dir(object_number: str) -> Path:
-    obj_dir = DATA_DIR / f"объект_{object_number}"
-    obj_dir.mkdir(parents=True, exist_ok=True)
-    return obj_dir
-
-async def delete_message_later(context: ContextTypes.DEFAULT_TYPE, chat_id, message_id, delay=1):
-    await asyncio.sleep(delay)
-    try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except:
-        pass
+        json.dump(users, f, indent=2, ensure_ascii=False)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    if user_id not in USERS:
+    users = load_users()
+    if user_id not in users:
         await update.message.reply_text(
             "Привет! Для работы с ботом нужно зарегистрироваться.\n"
-            "Пожалуйста, отправьте свои данные в формате: ФИО, телефон"
+            "Отправьте ваши данные в формате: ФИО и номер телефона\n"
+            "Пример: Иванов Иван Иванович +79998887766"
         )
-        return REGISTER
     else:
-        await update.message.reply_text(
-            "Привет! Вы уже зарегистрированы. Используйте /object для начала загрузки файлов."
-        )
-        return ConversationHandler.END
+        await update.message.reply_text("Вы уже зарегистрированы! Используйте /object для загрузки файлов.")
 
-async def register(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def register_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    text = update.message.text
-
-    phone = extract_phone(text)
-    name_part = text.replace(phone[-10:], "").replace(",", "").strip() if phone else text
-    full_name = normalize_name(name_part)
-
-    if not phone:
-        await update.message.reply_text("Не удалось распознать номер телефона. Попробуйте снова.")
-        return REGISTER
-
-    USERS[user_id] = {
+    text = update.message.text.strip()
+    parts = text.split()
+    if len(parts) < 2:
+        await update.message.reply_text("Неправильный формат. Попробуйте снова: ФИО и номер телефона")
+        return
+    phone_digits = ''.join(filter(str.isdigit, text))
+    if len(phone_digits) < 10:
+        await update.message.reply_text("Неправильный номер телефона. Попробуйте снова.")
+        return
+    full_name = ' '.join([p.upper() for p in parts[:-1]])
+    phone = '+' + phone_digits[-11:]  # оставляем последние 11 цифр
+    users = load_users()
+    users[user_id] = {
         "full_name": full_name,
         "phone": phone,
         "username": update.effective_user.username,
@@ -95,137 +69,183 @@ async def register(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "last_name": update.effective_user.last_name,
         "registered_at": datetime.now().isoformat()
     }
-    save_users()
-    await update.message.reply_text(f"Регистрация успешна ✅\nПривет, {full_name}!")
-    return ConversationHandler.END
+    save_users(users)
+    await update.message.reply_text(f"Регистрация успешна! Добро пожаловать, {full_name}. Используйте /object для загрузки файлов.")
 
-async def object_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def object_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    if user_id not in USERS:
-        await update.message.reply_text("Сначала зарегистрируйтесь командой /start.")
-        return ConversationHandler.END
+    users = load_users()
+    if user_id not in users:
+        await start(update, context)
+        return
+    await update.message.reply_text("Введите номер объекта для загрузки файлов:")
+    user_sessions[user_id] = {"step": "awaiting_object"}
 
-    await update.message.reply_text("Введите номер объекта:")
-    return OBJECT
-
-async def receive_object_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    object_number = update.message.text.strip()
-    SESSIONS[user_id] = {
-        "object_number": object_number,
-        "checklist_index": 0,
-        "files": {step: [] for step in CHECKLIST},
-        "msg_ids_to_delete": []
-    }
-    await send_next_checklist_step(update, context, user_id)
-    return FILE_UPLOAD
+    session = user_sessions.get(user_id, {})
+    if session.get("step") == "awaiting_object":
+        object_number = update.message.text.strip()
+        session.update({
+            "object_number": object_number,
+            "step": "awaiting_file",
+            "files": [],
+            "current_file_type_index": 0,
+            "messages_to_delete": []
+        })
+        user_sessions[user_id] = session
+        await prompt_next_file(update, context, user_id)
+    elif session.get("step") == "register":
+        await register_user(update, context)
 
-async def send_next_checklist_step(update, context, user_id):
-    session = SESSIONS[user_id]
-    idx = session["checklist_index"]
-    if idx >= len(CHECKLIST):
-        msg = await update.message.reply_text(
-            "✅ Все пункты чек-листа пройдены. Нажмите '✅ Завершить загрузку', чтобы отправить файлы.",
-            reply_markup=ReplyKeyboardMarkup([["✅ Завершить загрузку"], ["❌ Отмена"]], resize_keyboard=True)
-        )
-        session["msg_ids_to_delete"].append(msg.message_id)
+async def prompt_next_file(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id):
+    session = user_sessions[user_id]
+    if session["current_file_type_index"] >= len(CHECKLIST):
+        # Все типы файлов загружены
+        await update.message.reply_text("Все файлы загружены. Нажмите '✅ Завершить загрузку', чтобы отправить в чат.")
+        keyboard = [[InlineKeyboardButton("✅ Завершить загрузку", callback_data="finish_upload")]]
+        msg = await update.message.reply_text("Завершить загрузку?", reply_markup=InlineKeyboardMarkup(keyboard))
+        session["messages_to_delete"].append(msg.message_id)
+        user_sessions[user_id] = session
         return
+    current_type = CHECKLIST[session["current_file_type_index"]]
+    msg = await update.message.reply_text(f"Отправьте файл(ы) для: {current_type}\nМожно несколько сообщений.")
+    session["messages_to_delete"].append(msg.message_id)
+    user_sessions[user_id] = session
 
-    step_name = CHECKLIST[idx]
-    msg = await update.message.reply_text(
-        f"Отправьте файл(ы) для: {step_name}\n"
-        "Можно отправлять несколько сообщений (фото/видео/документы).\n"
-        "Когда всё отправите — нажмите '✅ Завершить загрузку'."
-    )
-    session["msg_ids_to_delete"].append(msg.message_id)
-
-async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    if user_id not in SESSIONS:
-        await update.message.reply_text("Сначала выберите объект командой /object.")
+    session = user_sessions.get(user_id)
+    if not session or session.get("step") != "awaiting_file":
         return
-
-    session = SESSIONS[user_id]
-    idx = session["checklist_index"]
-    if idx >= len(CHECKLIST):
-        return
-
-    step_name = CHECKLIST[idx]
-    files_dir = create_object_dir(session["object_number"]) / step_name
-    files_dir.mkdir(parents=True, exist_ok=True)
+    file_type = CHECKLIST[session["current_file_type_index"]]
+    files = []
 
     if update.message.photo:
-        file_obj = update.message.photo[-1].get_file()
-        file_path = files_dir / f"{file_obj.file_id}.jpg"
-        await file_obj.download_to_drive(custom_path=file_path)
-        session["files"][step_name].append(file_path)
-    elif update.message.document:
-        file_obj = update.message.document.get_file()
-        file_path = files_dir / update.message.document.file_name
-        await file_obj.download_to_drive(custom_path=file_path)
-        session["files"][step_name].append(file_path)
+        for photo in update.message.photo:
+            f = await photo.get_file()
+            files.append(f)
     elif update.message.video:
-        file_obj = update.message.video.get_file()
-        file_path = files_dir / f"{file_obj.file_id}.mp4"
-        await file_obj.download_to_drive(custom_path=file_path)
-        session["files"][step_name].append(file_path)
+        f = await update.message.video.get_file()
+        files.append(f)
+    elif update.message.document:
+        f = await update.message.document.get_file()
+        files.append(f)
     else:
+        await update.message.reply_text("Пожалуйста, отправьте фото, видео или документ.")
         return
 
-    msg = await update.message.reply_text(f"Файл сохранён для '{step_name}'")
-    await delete_message_later(context, msg.chat_id, msg.message_id, delay=1)
-    await delete_message_later(context, update.message.chat_id, update.message.message_id, delay=1)
+    object_dir = DATA_DIR / f"object_{session['object_number']}"
+    object_dir.mkdir(exist_ok=True)
+
+    for f in files:
+        filename = os.path.join(object_dir, f"{file_type}_{f.file_id}")
+        await f.download_to_drive(filename)
+        session["files"].append({"path": filename, "type": file_type})
+
+    # Удаляем сообщение пользователя и уведомления бота
+    try:
+        await update.message.delete()
+    except:
+        pass
+
+    # Перейти к следующему типу файла
+    session["current_file_type_index"] += 1
+    user_sessions[user_id] = session
+    await prompt_next_file(update, context, user_id)
 
 async def finish_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    if user_id not in SESSIONS:
-        await update.message.reply_text("Сначала выберите объект командой /object.")
-        return ConversationHandler.END
-
-    session = SESSIONS[user_id]
+    query = update.callback_query
+    await query.answer()
+    user_id = str(query.from_user.id)
+    session = user_sessions.get(user_id)
+    if not session:
+        await query.message.reply_text("Нет активной сессии.")
+        return
     object_number = session["object_number"]
-    user_data = USERS.get(user_id)
-    sender_info = f"{user_data['full_name']} ({user_data['phone']})" if user_data else f"ID {user_id}"
+    users = load_users()
+    user_info = users.get(user_id)
+    if not user_info:
+        username_str = query.from_user.username or ""
+        user_display = f"{query.from_user.first_name} {query.from_user.last_name} ({username_str})"
+    else:
+        user_display = f"{user_info['full_name']} ({user_info['phone']})"
 
-    chat_id = update.message.chat_id
-    for step_name, files_list in session["files"].items():
-        if not files_list:
-            continue
-        await context.bot.send_message(chat_id, f"**{step_name}:**", parse_mode="Markdown")
-        for file_path in files_list:
-            with open(file_path, "rb") as f:
-                await context.bot.send_document(chat_id, f, caption=f"Объект {object_number}\nЗагружено: {sender_info}")
+    media_group = []
+    for f in session["files"]:
+        path = f["path"]
+        if path.lower().endswith((".jpg", ".jpeg", ".png")):
+            media_group.append(InputMediaPhoto(open(path, "rb"), caption=f"Объект {object_number}\nЗагружено: {user_display}"))
+        elif path.lower().endswith((".mp4", ".mov", ".mkv")):
+            media_group.append(InputMediaVideo(open(path, "rb"), caption=f"Объект {object_number}\nЗагружено: {user_display}"))
+        else:
+            await query.message.reply_document(open(path, "rb"), caption=f"Объект {object_number}\nЗагружено: {user_display}")
 
-    shutil.rmtree(create_object_dir(object_number), ignore_errors=True)
-    await update.message.reply_text(f"Загрузка для объекта {object_number} завершена ✅")
-    del SESSIONS[user_id]
-    return ConversationHandler.END
+    if media_group:
+        await context.bot.send_media_group(chat_id=query.message.chat_id, media=media_group)
 
-async def cancel_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Удаляем временные файлы
+    for f in session["files"]:
+        try:
+            os.remove(f["path"])
+        except:
+            pass
+    try:
+        os.rmdir(DATA_DIR / f"object_{object_number}")
+    except:
+        pass
+
+    # Удаляем служебные сообщения бота
+    for msg_id in session["messages_to_delete"]:
+        try:
+            await context.bot.delete_message(chat_id=query.message.chat_id, message_id=msg_id)
+        except:
+            pass
+
+    user_sessions.pop(user_id)
+    await query.message.reply_text(f"Файлы по объекту {object_number} успешно отправлены!")
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    if user_id in SESSIONS:
-        shutil.rmtree(create_object_dir(SESSIONS[user_id]["object_number"]), ignore_errors=True)
-        del SESSIONS[user_id]
-    await update.message.reply_text("Загрузка отменена ❌")
-    return ConversationHandler.END
+    session = user_sessions.get(user_id)
+    if session:
+        for f in session.get("files", []):
+            try:
+                os.remove(f["path"])
+            except:
+                pass
+        for msg_id in session.get("messages_to_delete", []):
+            try:
+                await context.bot.delete_message(chat_id=update.message.chat_id, message_id=msg_id)
+            except:
+                pass
+        user_sessions.pop(user_id)
+        await update.message.reply_text("Загрузка отменена и временные файлы удалены.")
+    else:
+        await update.message.reply_text("Нет активной сессии.")
 
-app = ApplicationBuilder().token(os.environ.get("TOKEN")).build()
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "/start — начать работу с ботом\n"
+        "/object — выбрать объект для загрузки файлов\n"
+        "/cancel — отменить текущую загрузку\n"
+        "/help — показать справку"
+    )
 
-conv_handler = ConversationHandler(
-    entry_points=[CommandHandler("start", start), CommandHandler("object", object_choice)],
-    states={
-        REGISTER: [MessageHandler(filters.TEXT & ~filters.COMMAND, register)],
-        OBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_object_number)],
-        FILE_UPLOAD: [
-            MessageHandler(filters.ALL & ~filters.COMMAND, handle_files),
-            MessageHandler(filters.Regex("✅ Завершить загрузку"), finish_upload),
-            MessageHandler(filters.Regex("❌ Отмена"), cancel_upload)
-        ],
-    },
-    fallbacks=[CommandHandler("cancel", cancel_upload)],
-)
+def main():
+    TOKEN = os.getenv("TOKEN")
+    app = ApplicationBuilder().token(TOKEN).build()
 
-app.add_handler(conv_handler)
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("object", object_command))
+    app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO, handle_file))
+    app.add_handler(CallbackQueryHandler(finish_upload, pattern="^finish_upload$"))
 
-print("Бот запущен…")
-app.run_polling()
+    print("Бот запущен...")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
