@@ -3,3 +3,7 @@ __pycache__/
 .env
 data/
 *.pyc
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
