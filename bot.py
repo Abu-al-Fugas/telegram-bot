@@ -1,36 +1,48 @@
+import os
 import logging
 import pandas as pd
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from flask import Flask, request
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    InputMediaPhoto, InputMediaVideo, Bot
+)
+from telegram.ext import (
+    Dispatcher, CommandHandler, MessageHandler, CallbackQueryHandler,
+    ContextTypes, filters
+)
+from telegram.ext import CallbackContext
 
 # Настройка логов
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Flask-приложение
+app = Flask(__name__)
+
+# Telegram Bot
+TOKEN = os.environ.get("TELEGRAM_TOKEN")
+if not TOKEN:
+    raise ValueError("TELEGRAM_TOKEN не найден в переменных окружения")
+bot = Bot(token=TOKEN)
+dispatcher = Dispatcher(bot=bot, update_queue=None, workers=0)
+
 # Загрузка Excel
-EXCEL_FILE = "objects.xlsx"  # файл с данными
+EXCEL_FILE = "objects.xlsx"
 df = pd.read_excel(EXCEL_FILE)
 
-# Словарь для хранения текущего состояния пользователей
+# Словарь для хранения состояния пользователей
 user_data = {}
 
-# Команда /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Привет! Используй команду /object чтобы выбрать объект."
-    )
+# ===== Команды =====
+async def start(update: Update, context: CallbackContext):
+    await update.message.reply_text("Привет! Используй /object для выбора объекта.")
 
-# Команда /object
-async def object_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def object_command(update: Update, context: CallbackContext):
     user_id = update.message.from_user.id
     user_data[user_id] = {"stage": "waiting_object", "files": [], "file_messages": []}
     await update.message.reply_text("Введите номер объекта:")
 
-# Получение номера объекта
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_text(update: Update, context: CallbackContext):
     user_id = update.message.from_user.id
     if user_id not in user_data:
         return
@@ -39,41 +51,41 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if stage == "waiting_object":
         obj_number = update.message.text.strip()
         if not obj_number.isdigit():
-            await update.message.reply_text("Неверный номер объекта. Попробуйте ещё раз.")
+            await update.message.reply_text("Номер неверен.")
             return
         obj_number = int(obj_number)
         row = df[df.iloc[:, 0] == obj_number]
         if row.empty:
             await update.message.reply_text("Объект не найден.")
             return
+
         user_data[user_id]["stage"] = "uploading_files"
         user_data[user_id]["object_number"] = obj_number
         user_data[user_id]["object_row"] = row.iloc[0]
-        # Кнопка завершения загрузки
-        keyboard = [
-            [InlineKeyboardButton("✅ Завершить загрузку", callback_data="finish_upload")]
-        ]
-        await update.message.reply_text("Отправляйте файлы (фото/видео)", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# Прием файлов (фото и видео)
-async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        keyboard = [[InlineKeyboardButton("✅ Завершить загрузку", callback_data="finish_upload")]]
+        await update.message.reply_text("Отправляйте файлы:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+# ===== Прием фото/видео =====
+async def handle_media(update: Update, context: CallbackContext):
     user_id = update.message.from_user.id
-    if user_id not in user_data:
-        return
-    stage = user_data[user_id].get("stage")
-    if stage != "uploading_files":
+    if user_id not in user_data or user_data[user_id].get("stage") != "uploading_files":
         return
 
     media = update.message.photo or update.message.video
     if not media:
         return
 
-    user_data[user_id]["files"].append(media[-1] if isinstance(media, list) else media)
+    # Для фото выбираем максимальное качество
+    if isinstance(media, list):
+        media = media[-1]
+
+    user_data[user_id]["files"].append(media)
     user_data[user_id]["file_messages"].append(update.message)
     await update.message.reply_text(f"Файл получен ({len(user_data[user_id]['files'])})")
 
-# Кнопка завершения загрузки
-async def finish_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ===== Завершение загрузки =====
+async def finish_upload(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -86,7 +98,6 @@ async def finish_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     caption = f"Объект {obj_number}\nНаименование: {obj_row[1]}\nАдрес: {obj_row[2] if pd.notna(obj_row[2]) else 'не указан'}"
 
-    # Формируем медиагруппу
     media_group = []
     for f in data["files"]:
         if f.file_type == "photo":
@@ -95,10 +106,10 @@ async def finish_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
             media_group.append(InputMediaVideo(f.file_id))
 
     if media_group:
-        await context.bot.send_media_group(chat_id=query.message.chat_id, media=media_group)
-        await context.bot.send_message(chat_id=query.message.chat_id, text=caption)
+        await bot.send_media_group(chat_id=query.message.chat_id, media=media_group)
+        await bot.send_message(chat_id=query.message.chat_id, text=caption)
 
-    # Удаляем сообщения пользователя с файлами
+    # Удаляем исходные сообщения
     for msg in data["file_messages"]:
         try:
             await msg.delete()
@@ -108,19 +119,24 @@ async def finish_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Сбрасываем данные пользователя
     user_data[user_id] = {}
 
-# Основная функция
-def main():
-    TOKEN = "YOUR_BOT_TOKEN"  # замените на токен вашего бота
-    app = ApplicationBuilder().token(TOKEN).build()
+# ===== Настройка диспетчера =====
+dispatcher.add_handler(CommandHandler("start", start))
+dispatcher.add_handler(CommandHandler("object", object_command))
+dispatcher.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+dispatcher.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, handle_media))
+dispatcher.add_handler(CallbackQueryHandler(finish_upload, pattern="finish_upload"))
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("object", object_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, handle_media))
-    app.add_handler(CallbackQueryHandler(finish_upload, pattern="finish_upload"))
+# ===== Flask Webhook =====
+@app.route("/healthz", methods=["GET"])
+def health_check():
+    return "OK", 200
 
-    print("Бот запущен...")
-    app.run_polling()
+@app.route(f"/{TOKEN}", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), bot)
+    dispatcher.process_update(update)
+    return "OK", 200
 
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
