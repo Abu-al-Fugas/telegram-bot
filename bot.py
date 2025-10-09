@@ -1,10 +1,13 @@
 # bot.py - финальная версия: регистрация, временное хранилище, чек-лист, удаление временных файлов
+# + встроенный мини-web-server (Flask) с /healthz чтобы Render видел открытый порт
 import os
 import json
 import time
 import logging
+import threading
 from datetime import datetime
 from typing import Dict, Any, List, Optional
+from flask import Flask
 
 from telegram import (
     Update,
@@ -25,11 +28,13 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
-TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = os.getenv("BOT_TOKEN")  # обязательно установить в Render env
+if not TOKEN:
+    log.error("BOT_TOKEN не задан. Установите переменную окружения BOT_TOKEN.")
 BASE_DIR = os.getenv("DATA_DIR", "data")  # по умолчанию "./data"
 USERS_PATH = os.path.join(BASE_DIR, "users.json")
 
-# чеклист: ключ папки => описание (как ты подтвердил)
+# чеклист: ключ папки => описание
 CHECKLIST = [
     ("photo_old_meter", "Фото заменяемого счётчика"),
     ("photo_old_seals", "Фото пломб старого счётчика"),
@@ -41,21 +46,26 @@ CHECKLIST = [
 ]
 
 # ---------- Внутренние структуры ----------
-# awaiting_object: user_id -> {"action": "object", "chat_id": int, "prompt_msg": (chat_id,msg_id)}
 awaiting_object: Dict[int, Dict[str, Any]] = {}
-
-# awaiting_registration: user_id -> {"chat_id": int, "prompt_msg": (chat_id,msg_id)}
 awaiting_registration: Dict[int, Dict[str, Any]] = {}
-
-# user_sessions: user_id -> session
-# session:
-#   object_id: str
-#   pending_item: Optional[str]
-#   checklist_msg: (chat_id,message_id)
-#   bot_messages: list of (chat_id,message_id)  # temporary bot messages to delete later
 user_sessions: Dict[int, Dict[str, Any]] = {}
 
 os.makedirs(BASE_DIR, exist_ok=True)
+
+
+# ---------- Flask — health endpoint для Render / UptimeRobot ----------
+flask_app = Flask(__name__)
+
+@flask_app.route("/healthz")
+def health_check():
+    return "OK", 200
+
+def run_flask():
+    # Render экспортирует PORT, используем его. По умолчанию 10000
+    port = int(os.environ.get("PORT", 10000))
+    log.info("Starting Flask health server on port %s", port)
+    # Запускаем без debug, чтобы не блокировать
+    flask_app.run(host="0.0.0.0", port=port)
 
 
 # ---------- Пользователи (users.json) ----------
@@ -94,7 +104,7 @@ def register_user(user_id: int, full_name: str, phone: str, tg_user: Dict[str, A
     save_users(users)
 
 
-def get_user_display(user_id: int) -> str:
+def get_user_display(user_id: int) -> Optional[str]:
     users = load_users()
     u = users.get(str(user_id))
     if u:
@@ -183,12 +193,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_register(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /register — начать процесс регистрации (ожидаем следующего сообщения с 'ФИО, +7999...')"""
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     prompt = await update.message.reply_text("Пожалуйста, отправьте в следующем сообщении свои данные в формате:\nИванов Иван Иванович, +79998887766")
     awaiting_registration[user_id] = {"chat_id": chat_id, "prompt_msg": (prompt.chat_id, prompt.message_id)}
-    # удалим командное сообщение (по желанию) — не обязательно
     try:
         await update.message.delete()
     except Exception:
@@ -196,7 +204,6 @@ async def cmd_register(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_object(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Шаг 1: /object — ждём следующий текст с номером объекта"""
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
 
@@ -250,8 +257,6 @@ async def handle_text_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.delete()
             except Exception:
                 pass
-            # удалим ответ-уведомление бота через небольшую задержку ( опционально ). здесь оставляем его недолго
-            # (мы не сохраняем его id — оно автоматически исчезнет по таймауту, но можно удалить)
             return
         else:
             # неверный формат — попросим повторить
@@ -261,7 +266,6 @@ async def handle_text_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.delete()
             except Exception:
                 pass
-            # удалим предупреждение через пару секунд (необязательно) — но чтобы не засорять чат, удалим через 8 сек
             try:
                 await context.bot.delete_message(chat_id=warn.chat_id, message_id=warn.message_id)
             except Exception:
@@ -283,7 +287,6 @@ async def handle_text_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.delete()
             except Exception:
                 pass
-            # удалим предупреждение через пару сек
             try:
                 await context.bot.delete_message(chat_id=warn.chat_id, message_id=warn.message_id)
             except Exception:
@@ -493,7 +496,6 @@ async def handle_finish_by_user(user_id: int, chat_id: int, context: ContextType
 
     # Подпись загрузчика: стараемся брать из users.json, иначе использовать tg name
     uploader_display = get_user_display(user_id) or (context.bot.get_chat_member(chat_id=user_id).user.full_name if False else None)
-    # (выше: context.bot.get_chat_member не всегда сработает; мы уже записали uploader_name в entry)
 
     summary_msg = await context.bot.send_message(chat_id=chat_id, text=f"Собираю файлы по Объекту {obj_id}...")
     record_bot_message(session, summary_msg.chat_id, summary_msg.message_id)
@@ -531,15 +533,11 @@ async def handle_finish_by_user(user_id: int, chat_id: int, context: ContextType
 
     # После успешной отправки — удаляем временные локальные файлы для этого объекта
     try:
-        # удаляем весь obj_dir целиком
-        import shutil
         shutil.rmtree(obj_dir, ignore_errors=True)
     except Exception as e:
         log.exception("Ошибка при удалении временных файлов: %s", e)
 
-    # Удаляем все служебные сообщения бота, связанные с сессией (но НЕ удаляем сгруппированные сообщения с файлами,
-    # потому что это финальный отчёт, который мы хотим оставить в чате). Мы записывали только временные сообщения
-    # (prompts, notifications, чек-лист).
+    # Удаляем все служебные сообщения бота, связанные с сессией
     bot_msgs: List[Any] = session.get("bot_messages", []) or []
     for (c, m_id) in bot_msgs:
         try:
@@ -565,7 +563,10 @@ async def cleanup_session(user_id: int, context: ContextTypes.DEFAULT_TYPE, noti
     if not session:
         # уведомим, если нужно
         if notify:
-            await context.bot.send_message(chat_id=context.bot.id, text="Сессия не найдена.")
+            try:
+                await context.bot.send_message(chat_id=context.bot.id, text="Сессия не найдена.")
+            except Exception:
+                pass
         return
 
     # удаляем временные сообщения
@@ -582,18 +583,17 @@ async def cleanup_session(user_id: int, context: ContextTypes.DEFAULT_TYPE, noti
             await safe_delete(context.bot, checklist[0], checklist[1])
         except Exception:
             pass
-    # удаляем временную папку с файлами (можно держать или удалять — по требованию удалим)
+    # удаляем временную папку с файлами
     obj_id = session.get("object_id")
     if obj_id:
         try:
-            import shutil
             shutil.rmtree(object_dir(obj_id), ignore_errors=True)
         except Exception:
             pass
     # удаляем сессию
     user_sessions.pop(user_id, None)
     if notify:
-        # отправим краткое подтверждение в чат (попытка — иногда бот не может)
+        # отправим краткое подтверждение в чат (попытка)
         try:
             await context.bot.send_message(chat_id=checklist[0] if checklist else context.bot.id, text="Сессия отменена.")
         except Exception:
@@ -602,6 +602,10 @@ async def cleanup_session(user_id: int, context: ContextTypes.DEFAULT_TYPE, noti
 
 # ---------- Инициализация ----------
 def main():
+    # Запускаем Flask health-сервер в отдельном демоническом потоке
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+
     if not TOKEN:
         log.error("BOT_TOKEN не задан. Установите переменную окружения BOT_TOKEN.")
         return
@@ -617,7 +621,6 @@ def main():
     # Хендлеры
     app.add_handler(CallbackQueryHandler(choose_callback))
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, handle_file))
-    # Текстовые сообщения: для регистрации и ввода номера объекта
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text_next))
 
     # Устанавливаем видимые команды в меню
@@ -634,8 +637,8 @@ def main():
         log.warning("Не удалось установить команды: %s", e)
 
     log.info("Starting bot...")
+    # Запускаем polling (процесс будет работать; Flask держит порт открытым)
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
