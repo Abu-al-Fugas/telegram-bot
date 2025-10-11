@@ -1,0 +1,25 @@
+# Файлы с данными (создаются автоматически на сервере)
+data/
+*.json
+
+# Файлы Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# Файлы окружения (никогда не коммитьте токены!)
+.env
+.env.local
+.env.production
+
+# Системные файлы
+.DS_Store
+Thumbs.db
+
+# Логи
+*.log
