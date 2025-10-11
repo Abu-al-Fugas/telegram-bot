@@ -1,6 +1,6 @@
 import os
 import json
-import pandas as pd
+import openpyxl
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from flask import Flask, request
@@ -15,23 +15,30 @@ OBJECTS_EXCEL_FILE = 'objects.xlsx'
 OBJECTS_DATA_FILE = 'data/objects_data.json'
 USER_STATE_FILE = 'data/user_state.json'
 
-# Загружаем данные об объектах из Excel
+# Загружаем данные об объектах из Excel с использованием openpyxl
 def load_objects_from_excel():
-    df = pd.read_excel(OBJECTS_EXCEL_FILE)
-    # Предполагаем, что столбцы называются '№', 'Наименование', 'Адрес'
-    # Если названия другие, замените их здесь
-    df.columns = ['Number', 'Name', 'Address']
-    objects_dict = {}
-    for _, row in df.iterrows():
-        objects_dict[str(row['Number']).strip()] = {
-            'name': row['Name'],
-            'address': row['Address'],
-            'status': 'Не начат',  # Статус по умолчанию
-            'photos': {},          # Для хранения file_id фото
-            'acts': {},            # Для хранения file_id актов
-            'comments': []         # Для хранения комментариев/проблем
-        }
-    return objects_dict
+    try:
+        workbook = openpyxl.load_workbook(OBJECTS_EXCEL_FILE)
+        sheet = workbook.active
+        
+        objects_dict = {}
+        # Пропускаем заголовок (первую строку) и читаем данные
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            if row[0] is None:  # Если пустая строка
+                continue
+            obj_number = str(row[0]).strip()
+            objects_dict[obj_number] = {
+                'name': row[1] or '',
+                'address': row[2] or '',
+                'status': 'Не начат',  # Статус по умолчанию
+                'photos': {},          # Для хранения file_id фото
+                'acts': {},            # Для хранения file_id актов
+                'comments': []         # Для хранения комментариев/проблем
+            }
+        return objects_dict
+    except Exception as e:
+        print(f"Ошибка загрузки Excel файла: {e}")
+        return {}
 
 # Загружаем или создаем файл с дополнительными данными по объектам
 def load_objects_data():
@@ -327,4 +334,4 @@ if __name__ == "__main__":
     bot.set_webhook(url=WEBHOOK_URL)
     print(f"Webhook установлен: {WEBHOOK_URL}")
 
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
