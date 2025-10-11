@@ -38,6 +38,7 @@ def index():
 if __name__ == "__main__":
     bot.remove_webhook()
     # ⚠️ Вставь сюда свой URL от Render:
-    WEBHOOK_URL = f"https://твоё_имя_сервиса.onrender.com/{TOKEN}"
+    WEBHOOK_URL = f"https://telegram-bot-b6pn.onrender.com/{TOKEN}"
     bot.set_webhook(url=WEBHOOK_URL)
+
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
