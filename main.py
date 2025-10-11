@@ -6,6 +6,7 @@ from flask import Flask, request
 from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
+import openpyxl
 
 # ========== НАСТРОЙКИ ==========
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -18,6 +19,29 @@ app = Flask(__name__)
 # Глобальные переменные
 user_state = {}
 processed_objects = set()
+objects_data = {}
+
+# ========== ЗАГРУЗКА ДАННЫХ ИЗ EXCEL ==========
+def load_objects_from_excel():
+    """Загружает объекты из Excel файла"""
+    global objects_data
+    try:
+        workbook = openpyxl.load_workbook('objects.xlsx')
+        sheet = workbook.active
+        
+        objects_dict = {}
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            if row[0] is not None:
+                obj_number = str(row[0]).strip()
+                objects_dict[obj_number] = {
+                    'name': row[1] or '',
+                    'address': row[2] or '',
+                    'status': 'Не начат'
+                }
+        return objects_dict
+    except Exception as e:
+        print(f"Ошибка загрузки Excel: {e}")
+        return {}
 
 # ========== GOOGLE SHEETS ==========
 def init_google_sheets():
@@ -38,25 +62,17 @@ def update_google_sheets(object_id, status="✅ Обработан"):
     try:
         client = init_google_sheets()
         if not client:
-            print("Google Sheets client not initialized")
             return False
         
-        # Открываем таблицу
         sheet = client.open("Объекты ИПУГ").sheet1
-        
-        # Получаем все данные
         all_data = sheet.get_all_values()
         
-        # Ищем объект по номеру (первый столбец)
         for i, row in enumerate(all_data, start=1):
-            if i == 1:  # Пропускаем заголовок
+            if i == 1:
                 continue
                 
             if row and str(row[0]).strip() == str(object_id):
-                # Обновляем статус (4-й столбец - D)
                 sheet.update_cell(i, 4, status)
-                
-                # Красим ячейку в зеленый
                 sheet.format(f"D{i}", {
                     "backgroundColor": {
                         "red": 0.7,
@@ -64,21 +80,17 @@ def update_google_sheets(object_id, status="✅ Обработан"):
                         "blue": 0.7
                     }
                 })
-                print(f"✅ Обновлен Google Sheets для объекта {object_id}")
                 return True
-        
-        print(f"❌ Объект {object_id} не найден в Google Sheets")
         return False
         
     except Exception as e:
-        print(f"❌ Ошибка обновления Google Sheets: {e}")
+        print(f"Ошибка обновления Google Sheets: {e}")
         return False
 
 # ========== АРХИВ В TELEGRAM ==========
 def save_to_archive(object_id, files_count, file_types):
     """Сохраняет информацию в архивный чат"""
     try:
-        # Формируем описание типов файлов
         type_description = []
         if file_types.get('photos', 0) > 0:
             type_description.append(f"📸 {file_types['photos']} фото")
@@ -97,21 +109,21 @@ def save_to_archive(object_id, files_count, file_types):
         bot.send_message(ARCHIVE_CHAT_ID, message_text.strip())
         return True
     except Exception as e:
-        print(f"❌ Ошибка сохранения в архив: {e}")
+        print(f"Ошибка сохранения в архив: {e}")
         return False
 
-# ========== БАЗА ДАННЫХ ОБЪЕКТОВ ==========
-def get_object_info(object_id):
-    """Получает информацию об объекте (имитация базы данных)"""
-    objects_data = {
-        "15": {"name": "Кафе 'Восток'", "address": "г. Махачкала, ул. Ленина, 15", "status": "Не начат"},
-        "20": {"name": "Школа №45", "address": "г. Махачкала, ул. Гагарина, 27", "status": "Не начат"},
-        "25": {"name": "Больница им. Петрова", "address": "г. Махачкала, пр. Революции, 8", "status": "Не начат"},
-        "30": {"name": "Магазин 'Продукты'", "address": "г. Махачкала, ул. Советская, 42", "status": "Не начат"},
-        "35": {"name": "Офисное здание", "address": "г. Махачкала, пр. Гамидова, 15", "status": "Не начат"}
-    }
-    
-    return objects_data.get(object_id)
+# ========== КЛАВИАТУРА ==========
+def create_main_keyboard():
+    """Создает основную клавиатуру с командами"""
+    keyboard = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    keyboard.add(
+        KeyboardButton('/info'),
+        KeyboardButton('/upload'),
+        KeyboardButton('/download'), 
+        KeyboardButton('/processed'),
+        KeyboardButton('/help')
+    )
+    return keyboard
 
 # ========== КОМАНДЫ БОТА ==========
 @bot.message_handler(commands=['start', 'help'])
@@ -126,22 +138,24 @@ def start_message(message):
 /download - Скачать файлы объекта
 /processed - Список обработанных объектов
 
-💡 Просто введите команду и следуйте инструкциям!
+💡 Используйте кнопки ниже для быстрого доступа!
     """
-    bot.reply_to(message, help_text.strip())
+    bot.reply_to(message, help_text.strip(), reply_markup=create_main_keyboard())
 
-# ========== ИНФОРМАЦИЯ ОБ ОБЪЕКТЕ ==========
 @bot.message_handler(commands=['info'])
 def ask_info_object(message):
-    msg = bot.reply_to(message, "🔍 Введите номер объекта для получения информации:")
+    msg = bot.reply_to(message, "🔍 Введите номер объекта для получения информации:", reply_markup=create_main_keyboard())
     bot.register_next_step_handler(msg, process_info_object)
 
 def process_info_object(message):
+    if message.text.startswith('/'):
+        bot.reply_to(message, "❌ Пожалуйста, введите номер объекта, а не команду")
+        return
+        
     object_id = message.text.strip()
-    obj_info = get_object_info(object_id)
+    obj_info = objects_data.get(object_id)
     
     if obj_info:
-        # Проверяем, обработан ли объект
         is_processed = object_id in processed_objects
         status_icon = "✅" if is_processed else "⏳"
         
@@ -152,26 +166,27 @@ def process_info_object(message):
 📊 Статус: {obj_info['status']}
 💾 Обработан: {"Да" if is_processed else "Нет"}
         """
-        bot.reply_to(message, response.strip())
+        bot.reply_to(message, response.strip(), reply_markup=create_main_keyboard())
     else:
-        bot.reply_to(message, f"❌ Объект #{object_id} не найден")
+        bot.reply_to(message, f"❌ Объект #{object_id} не найден", reply_markup=create_main_keyboard())
 
-# ========== ЗАГРУЗКА ФАЙЛОВ ==========
 @bot.message_handler(commands=['upload'])
 def ask_upload_object(message):
-    msg = bot.reply_to(message, "📤 Введите номер объекта для загрузки файлов:")
+    msg = bot.reply_to(message, "📤 Введите номер объекта для загрузки файлов:", reply_markup=create_main_keyboard())
     bot.register_next_step_handler(msg, process_upload_object)
 
 def process_upload_object(message):
+    if message.text.startswith('/'):
+        bot.reply_to(message, "❌ Пожалуйста, введите номер объекта, а не команду")
+        return
+        
     object_id = message.text.strip()
+    obj_info = objects_data.get(object_id)
     
-    # Проверяем существование объекта
-    obj_info = get_object_info(object_id)
     if not obj_info:
-        bot.reply_to(message, f"❌ Объект #{object_id} не найден")
+        bot.reply_to(message, f"❌ Объект #{object_id} не найден", reply_markup=create_main_keyboard())
         return
     
-    # Сохраняем состояние пользователя
     user_state[message.chat.id] = {
         'object_id': object_id,
         'step': 'waiting_files',
@@ -181,11 +196,6 @@ def process_upload_object(message):
     
     bot.reply_to(message, f"""
 📎 Отправьте файлы для объекта #{object_id}
-
-Можно отправить:
-• Фотографии 📸
-• Документы 📄  
-• Видео 🎥
 
 Отправляйте файлы по одному или несколько сразу.
 Когда закончите, введите /done
@@ -202,30 +212,22 @@ def handle_files(message):
     files = user_state[chat_id]['files']
     file_types = user_state[chat_id]['file_types']
     
-    # Сохраняем информацию о файле
     file_info = {}
     
     if message.photo:
         file_id = message.photo[-1].file_id
         file_info = {'type': 'photo', 'file_id': file_id}
         file_types['photos'] += 1
-        
     elif message.document:
         file_id = message.document.file_id
-        file_info = {
-            'type': 'document', 
-            'file_id': file_id, 
-            'name': message.document.file_name
-        }
+        file_info = {'type': 'document', 'file_id': file_id, 'name': message.document.file_name}
         file_types['documents'] += 1
-        
     elif message.video:
         file_id = message.video.file_id
         file_info = {'type': 'video', 'file_id': file_id}
         file_types['videos'] += 1
     
     files.append(file_info)
-    
     total_files = len(files)
     bot.reply_to(message, f"✅ Файл получен! Всего: {total_files} файлов\nВведите /done когда закончите")
 
@@ -234,7 +236,7 @@ def finish_upload(message):
     chat_id = message.chat.id
     
     if chat_id not in user_state or user_state[chat_id]['step'] != 'waiting_files':
-        bot.reply_to(message, "❌ Нет активной загрузки файлов")
+        bot.reply_to(message, "❌ Нет активной загрузки файлов", reply_markup=create_main_keyboard())
         return
     
     object_id = user_state[chat_id]['object_id']
@@ -242,20 +244,13 @@ def finish_upload(message):
     file_types = user_state[chat_id]['file_types']
     
     if not files:
-        bot.reply_to(message, "❌ Не получено ни одного файла")
+        bot.reply_to(message, "❌ Не получено ни одного файла", reply_markup=create_main_keyboard())
         del user_state[chat_id]
         return
     
-    # Сохраняем в архив
     save_to_archive(object_id, len(files), file_types)
-    
-    # Обновляем Google Sheets
     update_google_sheets(object_id)
-    
-    # Добавляем в список обработанных
     processed_objects.add(object_id)
-    
-    # Очищаем состояние
     del user_state[chat_id]
     
     bot.reply_to(message, f"""
@@ -269,46 +264,45 @@ def finish_upload(message):
 
 💾 Данные сохранены в архив
 📈 Объект отмечен как обработанный
-    """.strip())
+    """.strip(), reply_markup=create_main_keyboard())
 
-# ========== СКАЧИВАНИЕ ФАЙЛОВ ==========
 @bot.message_handler(commands=['download'])
 def ask_download_object(message):
-    msg = bot.reply_to(message, "📥 Введите номер объекта для скачивания файлов:")
+    msg = bot.reply_to(message, "📥 Введите номер объекта для скачивания файлов:", reply_markup=create_main_keyboard())
     bot.register_next_step_handler(msg, process_download_object)
 
 def process_download_object(message):
+    if message.text.startswith('/'):
+        bot.reply_to(message, "❌ Пожалуйста, введите номер объекта, а не команду")
+        return
+        
     object_id = message.text.strip()
     
-    # Проверяем, обработан ли объект
     if object_id not in processed_objects:
-        bot.reply_to(message, f"❌ Для объекта #{object_id} нет файлов в архиве")
+        bot.reply_to(message, f"❌ Для объекта #{object_id} нет файлов в архиве", reply_markup=create_main_keyboard())
         return
     
-    # Имитация получения информации об архиве
     archive_info = f"""
 📁 Файлы объекта #{object_id} в архиве:
 
-💾 Архивный чат: @Архив
-🕒 Последнее обновление: {datetime.now().strftime('%d.%m.%Y %H:%M')}
-📋 Ищите по тегу: ОБЪЕКТ #{object_id}
+💾 Архивный чат доступен администраторам
+🕒 Объект обработан: {datetime.now().strftime('%d.%m.%Y %H:%M')}
+📋 Для доступа к файлам обратитесь к администратору
 
-🔍 Все файлы сохранены в архивном чате Telegram
+✅ Объект успешно обработан и сохранен в системе
     """
     
-    bot.reply_to(message, archive_info.strip())
+    bot.reply_to(message, archive_info.strip(), reply_markup=create_main_keyboard())
 
-# ========== СПИСОК ОБРАБОТАННЫХ ОБЪЕКТОВ ==========
 @bot.message_handler(commands=['processed'])
 def show_processed_objects(message):
     if not processed_objects:
-        bot.reply_to(message, "📭 Нет обработанных объектов")
+        bot.reply_to(message, "📭 Нет обработанных объектов", reply_markup=create_main_keyboard())
         return
     
-    # Получаем информацию об объектах
     objects_info = []
     for obj_id in sorted(processed_objects):
-        obj_info = get_object_info(obj_id)
+        obj_info = objects_data.get(obj_id)
         if obj_info:
             objects_info.append(f"• #{obj_id} - {obj_info['name']}")
         else:
@@ -322,15 +316,13 @@ def show_processed_objects(message):
 {objects_list}
 
 Всего: {len(processed_objects)} объектов
-    """.strip())
+    """.strip(), reply_markup=create_main_keyboard())
 
-# ========== ОБРАБОТКА ОШИБОК ==========
 @bot.message_handler(func=lambda message: True)
 def handle_other_messages(message):
-    if message.text.startswith('/'):
-        bot.reply_to(message, "❌ Неизвестная команда. Используйте /help для списка команд")
-    else:
-        bot.reply_to(message, "💡 Используйте команды из меню /help")
+    if not message.text.startswith('/'):
+        return
+    bot.reply_to(message, "❌ Неизвестная команда. Используйте /help для списка команд", reply_markup=create_main_keyboard())
 
 # ========== WEBHOOK ==========
 @app.route('/' + TOKEN, methods=['POST'])
@@ -347,12 +339,12 @@ def index():
 if __name__ == "__main__":
     print("🚀 Бот запускается...")
     
-    # Инициализируем Google Sheets
+    objects_data = load_objects_from_excel()
+    print(f"📊 Загружено объектов: {len(objects_data)}")
+    
     sheets_client = init_google_sheets()
     if sheets_client:
         print("✅ Google Sheets подключен")
-    else:
-        print("❌ Google Sheets не подключен")
     
     bot.remove_webhook()
     WEBHOOK_URL = f"https://telegram-bot-b6pn.onrender.com/{TOKEN}"
