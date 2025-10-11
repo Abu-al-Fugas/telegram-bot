@@ -21,6 +21,89 @@ user_state = {}
 objects_data = {}
 object_files = {}  # Хранит файлы для каждого объекта
 
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+def send_message_with_topic(chat_id, text, message_thread_id=None, reply_markup=None, parse_mode=None):
+    """Отправляет сообщение с учетом темы (topic)"""
+    try:
+        if message_thread_id:
+            return bot.send_message(
+                chat_id=chat_id,
+                message_thread_id=message_thread_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode
+            )
+        else:
+            return bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode
+            )
+    except Exception as e:
+        print(f"Ошибка отправки сообщения: {e}")
+        return bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
+
+def send_photo_with_topic(chat_id, photo, message_thread_id=None, caption=None):
+    """Отправляет фото с учетом темы"""
+    try:
+        if message_thread_id:
+            return bot.send_photo(
+                chat_id=chat_id,
+                message_thread_id=message_thread_id,
+                photo=photo,
+                caption=caption
+            )
+        else:
+            return bot.send_photo(
+                chat_id=chat_id,
+                photo=photo,
+                caption=caption
+            )
+    except Exception as e:
+        print(f"Ошибка отправки фото: {e}")
+        return bot.send_photo(chat_id, photo, caption=caption)
+
+def send_document_with_topic(chat_id, document, message_thread_id=None, caption=None):
+    """Отправляет документ с учетом темы"""
+    try:
+        if message_thread_id:
+            return bot.send_document(
+                chat_id=chat_id,
+                message_thread_id=message_thread_id,
+                document=document,
+                caption=caption
+            )
+        else:
+            return bot.send_document(
+                chat_id=chat_id,
+                document=document,
+                caption=caption
+            )
+    except Exception as e:
+        print(f"Ошибка отправки документа: {e}")
+        return bot.send_document(chat_id, document, caption=caption)
+
+def send_video_with_topic(chat_id, video, message_thread_id=None, caption=None):
+    """Отправляет видео с учетом темы"""
+    try:
+        if message_thread_id:
+            return bot.send_video(
+                chat_id=chat_id,
+                message_thread_id=message_thread_id,
+                video=video,
+                caption=caption
+            )
+        else:
+            return bot.send_video(
+                chat_id=chat_id,
+                video=video,
+                caption=caption
+            )
+    except Exception as e:
+        print(f"Ошибка отправки видео: {e}")
+        return bot.send_video(chat_id, video, caption=caption)
+
 # ========== ЗАГРУЗКА ДАННЫХ ИЗ EXCEL ==========
 def load_objects_from_excel():
     """Загружает объекты из Excel файла"""
@@ -155,7 +238,7 @@ def create_processed_keyboard():
     
     # Добавляем кнопки для каждого обработанного объекта
     processed_objects = sorted(object_files.keys())
-    buttons = [KeyboardButton(f"/download {obj}") for obj in processed_objects]
+    buttons = [KeyboardButton(f"📁 #{obj}") for obj in processed_objects]
     
     # Разбиваем на ряды по 3 кнопки
     for i in range(0, len(buttons), 3):
@@ -172,70 +255,117 @@ def start_message(message):
 
 📋 Доступные команды:
 
-/info - Информация об объекте
+/info - Информация об объекте (можно несколько через запятую)
 /upload - Загрузить файлы для объекта  
 /download - Скачать файлы объекта
 /processed - Список обработанных объектов
 
 💡 Используйте кнопки ниже для быстрого доступа!
     """
-    bot.reply_to(message, help_text.strip(), reply_markup=create_main_keyboard())
+    send_message_with_topic(
+        chat_id=message.chat.id,
+        message_thread_id=message.message_thread_id,
+        text=help_text.strip(),
+        reply_markup=create_main_keyboard()
+    )
 
 @bot.message_handler(commands=['info'])
 def ask_info_object(message):
-    msg = bot.reply_to(message, "🔍 Введите номер объекта для получения информации:", reply_markup=create_main_keyboard())
+    msg = send_message_with_topic(
+        chat_id=message.chat.id,
+        message_thread_id=message.message_thread_id,
+        text="🔍 Введите номер объекта для получения информации (можно несколько через запятую):",
+        reply_markup=create_main_keyboard()
+    )
     bot.register_next_step_handler(msg, process_info_object)
 
 def process_info_object(message):
     if message.text.startswith('/'):
-        bot.reply_to(message, "❌ Пожалуйста, введите номер объекта, а не команду")
+        send_message_with_topic(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text="❌ Пожалуйста, введите номер объекта, а не команду",
+            reply_markup=create_main_keyboard()
+        )
         return
         
-    object_id = message.text.strip()
-    obj_info = objects_data.get(object_id)
+    # Обрабатываем несколько объектов через запятую
+    object_ids = [obj_id.strip() for obj_id in message.text.split(',')]
+    responses = []
     
-    if obj_info:
-        is_processed = object_id in object_files
-        status_icon = "✅" if is_processed else "⏳"
+    for object_id in object_ids:
+        obj_info = objects_data.get(object_id)
         
-        response = f"""
+        if obj_info:
+            is_processed = object_id in object_files
+            status_icon = "✅" if is_processed else "⏳"
+            
+            response = f"""
 {status_icon} ОБЪЕКТ #{object_id}
 🏢 {obj_info['name']}
 📍 {obj_info['address']}
 📊 Статус: {obj_info['status']}
 💾 Обработан: {"Да" if is_processed else "Нет"}
-        """
-        bot.reply_to(message, response.strip(), reply_markup=create_main_keyboard())
-    else:
-        bot.reply_to(message, f"❌ Объект #{object_id} не найден", reply_markup=create_main_keyboard())
+---"""
+            responses.append(response)
+        else:
+            responses.append(f"❌ Объект #{object_id} не найден\n---")
+    
+    final_response = "\n".join(responses)
+    send_message_with_topic(
+        chat_id=message.chat.id,
+        message_thread_id=message.message_thread_id,
+        text=final_response,
+        reply_markup=create_main_keyboard()
+    )
 
 @bot.message_handler(commands=['upload'])
 def ask_upload_object(message):
-    msg = bot.reply_to(message, "📤 Введите номер объекта для загрузки файлов:", reply_markup=create_main_keyboard())
+    msg = send_message_with_topic(
+        chat_id=message.chat.id,
+        message_thread_id=message.message_thread_id,
+        text="📤 Введите номер объекта для загрузки файлов:",
+        reply_markup=create_main_keyboard()
+    )
     bot.register_next_step_handler(msg, process_upload_object)
 
 def process_upload_object(message):
     if message.text.startswith('/'):
-        bot.reply_to(message, "❌ Пожалуйста, введите номер объекта, а не команду")
+        send_message_with_topic(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text="❌ Пожалуйста, введите номер объекта, а не команду",
+            reply_markup=create_main_keyboard()
+        )
         return
         
     object_id = message.text.strip()
     obj_info = objects_data.get(object_id)
     
     if not obj_info:
-        bot.reply_to(message, f"❌ Объект #{object_id} не найден", reply_markup=create_main_keyboard())
+        send_message_with_topic(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text=f"❌ Объект #{object_id} не найден",
+            reply_markup=create_main_keyboard()
+        )
         return
     
-    # Сохраняем состояние пользователя с его user_id
+    # Сохраняем состояние пользователя с его user_id и данными темы
     user_id = message.from_user.id
     user_state[user_id] = {
         'object_id': object_id,
+        'chat_id': message.chat.id,
+        'message_thread_id': message.message_thread_id,
         'files': [],
         'file_types': {'photos': 0, 'documents': 0, 'videos': 0},
         'last_file_count': 0
     }
     
-    bot.reply_to(message, f"""
+    send_message_with_topic(
+        chat_id=message.chat.id,
+        message_thread_id=message.message_thread_id,
+        text=f"""
 📎 Загрузка файлов для объекта #{object_id}
 
 Отправляйте файлы (фото, документы, видео).
@@ -243,16 +373,25 @@ def process_upload_object(message):
 Для отмены - /cancel
 
 ✅ Файлы будут автоматически сохранены
-    """.strip(), reply_markup=create_upload_keyboard())
+        """.strip(),
+        reply_markup=create_upload_keyboard()
+    )
 
 @bot.message_handler(commands=['cancel'])
 def cancel_upload(message):
     user_id = message.from_user.id
     if user_id in user_state:
         object_id = user_state[user_id]['object_id']
+        chat_id = user_state[user_id]['chat_id']
+        message_thread_id = user_state[user_id].get('message_thread_id')
+        
         del user_state[user_id]
-        bot.reply_to(message, f"❌ Загрузка файлов для объекта #{object_id} отменена", 
-                    reply_markup=create_main_keyboard())
+        send_message_with_topic(
+            chat_id=chat_id,
+            message_thread_id=message_thread_id,
+            text=f"❌ Загрузка файлов для объекта #{object_id} отменена", 
+            reply_markup=create_main_keyboard()
+        )
 
 @bot.message_handler(content_types=['photo', 'document', 'video'])
 def handle_files(message):
@@ -281,8 +420,6 @@ def handle_files(message):
         file_types['videos'] += 1
     
     files.append(file_info)
-    
-    # Тихо сохраняем файл, без сообщения пользователю
     user_state[user_id]['last_file_count'] = len(files)
 
 @bot.message_handler(commands=['done'])
@@ -290,15 +427,27 @@ def finish_upload(message):
     user_id = message.from_user.id
     
     if user_id not in user_state:
-        bot.reply_to(message, "❌ Нет активной загрузки файлов", reply_markup=create_main_keyboard())
+        send_message_with_topic(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text="❌ Нет активной загрузки файлов", 
+            reply_markup=create_main_keyboard()
+        )
         return
     
     object_id = user_state[user_id]['object_id']
+    chat_id = user_state[user_id]['chat_id']
+    message_thread_id = user_state[user_id].get('message_thread_id')
     files = user_state[user_id]['files']
     file_types = user_state[user_id]['file_types']
     
     if not files:
-        bot.reply_to(message, "❌ Не получено ни одного файла", reply_markup=create_main_keyboard())
+        send_message_with_topic(
+            chat_id=chat_id,
+            message_thread_id=message_thread_id,
+            text="❌ Не получено ни одного файла", 
+            reply_markup=create_main_keyboard()
+        )
         del user_state[user_id]
         return
     
@@ -314,7 +463,10 @@ def finish_upload(message):
     # Очищаем состояние пользователя
     del user_state[user_id]
     
-    bot.reply_to(message, f"""
+    send_message_with_topic(
+        chat_id=chat_id,
+        message_thread_id=message_thread_id,
+        text=f"""
 ✅ УСПЕХ!
 
 📁 Для объекта #{object_id} сохранено:
@@ -325,13 +477,20 @@ def finish_upload(message):
 
 💾 Все файлы сохранены в архив
 📈 Объект отмечен как обработанный
-    """.strip(), reply_markup=create_main_keyboard())
+        """.strip(),
+        reply_markup=create_main_keyboard()
+    )
 
 @bot.message_handler(commands=['download'])
 def handle_download(message):
     # Обработка команды /download без номера
     if len(message.text.split()) == 1:
-        bot.reply_to(message, "📥 Введите номер объекта для скачивания файлов:", reply_markup=create_main_keyboard())
+        send_message_with_topic(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text="📥 Введите номер объекта для скачивания файлов:",
+            reply_markup=create_main_keyboard()
+        )
         return
     
     # Обработка команды /download с номером
@@ -339,37 +498,74 @@ def handle_download(message):
         object_id = message.text.split()[1]
         download_object_files(message, object_id)
     except IndexError:
-        bot.reply_to(message, "❌ Укажите номер объекта: /download 16", reply_markup=create_main_keyboard())
+        send_message_with_topic(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text="❌ Укажите номер объекта: /download 16",
+            reply_markup=create_main_keyboard()
+        )
 
 def download_object_files(message, object_id):
-    """Отправляет файлы объекта пользователю"""
+    """Отправляет файлы объекта пользователю в ту же тему"""
     if object_id not in object_files:
-        bot.reply_to(message, f"❌ Для объекта #{object_id} нет файлов", reply_markup=create_main_keyboard())
+        send_message_with_topic(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text=f"❌ Для объекта #{object_id} нет файлов",
+            reply_markup=create_main_keyboard()
+        )
         return
     
     files = object_files[object_id]
-    bot.reply_to(message, f"📁 Отправляю файлы объекта #{object_id}...", reply_markup=create_main_keyboard())
+    send_message_with_topic(
+        chat_id=message.chat.id,
+        message_thread_id=message.message_thread_id,
+        text=f"📁 Отправляю файлы объекта #{object_id}...",
+        reply_markup=create_main_keyboard()
+    )
     
-    # Отправляем файлы пользователю
+    # Отправляем файлы пользователю в ту же тему
     sent_count = 0
     for file_info in files:
         try:
             if file_info['type'] == 'photo':
-                bot.send_photo(message.chat.id, file_info['file_id'])
+                send_photo_with_topic(
+                    chat_id=message.chat.id,
+                    message_thread_id=message.message_thread_id,
+                    photo=file_info['file_id']
+                )
             elif file_info['type'] == 'document':
-                bot.send_document(message.chat.id, file_info['file_id'])
+                send_document_with_topic(
+                    chat_id=message.chat.id,
+                    message_thread_id=message.message_thread_id,
+                    document=file_info['file_id']
+                )
             elif file_info['type'] == 'video':
-                bot.send_video(message.chat.id, file_info['file_id'])
+                send_video_with_topic(
+                    chat_id=message.chat.id,
+                    message_thread_id=message.message_thread_id,
+                    video=file_info['file_id']
+                )
             sent_count += 1
         except Exception as e:
             print(f"Ошибка отправки файла: {e}")
     
-    bot.reply_to(message, f"✅ Отправлено {sent_count} файлов из {len(files)}", reply_markup=create_main_keyboard())
+    send_message_with_topic(
+        chat_id=message.chat.id,
+        message_thread_id=message.message_thread_id,
+        text=f"✅ Отправлено {sent_count} файлов из {len(files)}",
+        reply_markup=create_main_keyboard()
+    )
 
 @bot.message_handler(commands=['processed'])
 def show_processed_objects(message):
     if not object_files:
-        bot.reply_to(message, "📭 Нет обработанных объектов", reply_markup=create_main_keyboard())
+        send_message_with_topic(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text="📭 Нет обработанных объектов",
+            reply_markup=create_main_keyboard()
+        )
         return
     
     # Создаем клавиатуру с кнопками объектов
@@ -382,22 +578,37 @@ def show_processed_objects(message):
 
 👇 Выберите объект для скачивания файлов:
     """
-    bot.reply_to(message, response.strip(), reply_markup=keyboard)
+    send_message_with_topic(
+        chat_id=message.chat.id,
+        message_thread_id=message.message_thread_id,
+        text=response.strip(),
+        reply_markup=keyboard
+    )
 
-# Обработка кнопок скачивания
-@bot.message_handler(func=lambda message: message.text.startswith('/download '))
+# Обработка кнопок скачивания (формат: "📁 #16")
+@bot.message_handler(func=lambda message: message.text.startswith('📁 #'))
 def handle_download_button(message):
     try:
-        object_id = message.text.split()[1]
+        object_id = message.text.replace('📁 #', '').strip()
         download_object_files(message, object_id)
-    except IndexError:
-        bot.reply_to(message, "❌ Ошибка формата команды")
+    except Exception as e:
+        send_message_with_topic(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text="❌ Ошибка при обработке объекта",
+            reply_markup=create_main_keyboard()
+        )
 
 @bot.message_handler(func=lambda message: True)
 def handle_other_messages(message):
     if not message.text.startswith('/'):
         return
-    bot.reply_to(message, "❌ Неизвестная команда. Используйте /help для списка команд", reply_markup=create_main_keyboard())
+    send_message_with_topic(
+        chat_id=message.chat.id,
+        message_thread_id=message.message_thread_id,
+        text="❌ Неизвестная команда. Используйте /help для списка команд",
+        reply_markup=create_main_keyboard()
+    )
 
 # ========== WEBHOOK ==========
 @app.route('/' + TOKEN, methods=['POST'])
