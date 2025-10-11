@@ -335,20 +335,94 @@ def handle_download(message):
             reply_markup=create_main_keyboard()
         )
 
-# Обработка всех текстовых сообщений (номера объектов)
+@bot.message_handler(commands=['done'])
+def handle_done(message):
+    """Обрабатывает команду /done для завершения загрузки файлов"""
+    user_id = message.from_user.id
+    
+    # Проверяем, что пользователь в состоянии загрузки файлов
+    if user_id not in user_state or user_state[user_id].get('command') != 'upload_files':
+        send_message_with_topic(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text="❌ Нет активной загрузки файлов", 
+            reply_markup=create_main_keyboard()
+        )
+        return
+    
+    object_id = user_state[user_id]['object_id']
+    chat_id = user_state[user_id]['chat_id']
+    message_thread_id = user_state[user_id].get('message_thread_id')
+    files = user_state[user_id]['files']
+    file_types = user_state[user_id]['file_types']
+    
+    if not files:
+        send_message_with_topic(
+            chat_id=chat_id,
+            message_thread_id=message_thread_id,
+            text="❌ Не получено ни одного файла", 
+            reply_markup=create_main_keyboard()
+        )
+        del user_state[user_id]
+        return
+    
+    # Сохраняем файлы для объекта
+    object_files[object_id] = files
+    
+    # Сохраняем в архив (информация + все файлы)
+    save_to_archive(object_id, files, file_types)
+    
+    # Обновляем Google Sheets
+    update_google_sheets(object_id)
+    
+    # Очищаем состояние пользователя
+    del user_state[user_id]
+    
+    send_message_with_topic(
+        chat_id=chat_id,
+        message_thread_id=message_thread_id,
+        text=f"""
+✅ УСПЕХ!
+
+📁 Для объекта #{object_id} сохранено:
+📸 Фото: {file_types['photos']}
+📄 Документы: {file_types['documents']}  
+🎥 Видео: {file_types['videos']}
+📊 Всего: {len(files)} файлов
+
+💾 Все файлы сохранены в архив
+📈 Объект отмечен как обработанный
+        """.strip(),
+        reply_markup=create_main_keyboard()
+    )
+
+@bot.message_handler(commands=['cancel'])
+def cancel_upload(message):
+    user_id = message.from_user.id
+    if user_id in user_state and user_state[user_id].get('command') == 'upload_files':
+        object_id = user_state[user_id]['object_id']
+        chat_id = user_state[user_id]['chat_id']
+        message_thread_id = user_state[user_id].get('message_thread_id')
+        
+        del user_state[user_id]
+        send_message_with_topic(
+            chat_id=chat_id,
+            message_thread_id=message_thread_id,
+            text=f"❌ Загрузка файлов для объекта #{object_id} отменена", 
+            reply_markup=create_main_keyboard()
+        )
+
+# Обработка всех текстовых сообщений (НО только тех, что не начинаются с /)
 @bot.message_handler(func=lambda message: True, content_types=['text'])
 def handle_text_messages(message):
+    # Пропускаем команды (они начинаются с /)
+    if message.text.startswith('/'):
+        return
+    
     user_id = message.from_user.id
     
     # Если пользователь не в состоянии - игнорируем
     if user_id not in user_state:
-        if message.text.startswith('/'):
-            send_message_with_topic(
-                chat_id=message.chat.id,
-                message_thread_id=message.message_thread_id,
-                text="❌ Неизвестная команда. Используйте /help для списка команд",
-                reply_markup=create_main_keyboard()
-            )
         return
     
     # Получаем состояние пользователя
@@ -449,22 +523,6 @@ def process_download_object(message, state):
     # Вызываем функцию скачивания
     download_object_files(message, object_id)
 
-@bot.message_handler(commands=['cancel'])
-def cancel_upload(message):
-    user_id = message.from_user.id
-    if user_id in user_state and user_state[user_id].get('command') == 'upload_files':
-        object_id = user_state[user_id]['object_id']
-        chat_id = user_state[user_id]['chat_id']
-        message_thread_id = user_state[user_id].get('message_thread_id')
-        
-        del user_state[user_id]
-        send_message_with_topic(
-            chat_id=chat_id,
-            message_thread_id=message_thread_id,
-            text=f"❌ Загрузка файлов для объекта #{object_id} отменена", 
-            reply_markup=create_main_keyboard()
-        )
-
 @bot.message_handler(content_types=['photo', 'document', 'video'])
 def handle_files(message):
     user_id = message.from_user.id
@@ -494,66 +552,6 @@ def handle_files(message):
     
     files.append(file_info)
     user_state[user_id]['last_file_count'] = len(files)
-
-@bot.message_handler(commands=['done'])
-def finish_upload(message):
-    user_id = message.from_user.id
-    
-    # Проверяем, что пользователь в состоянии загрузки файлов
-    if user_id not in user_state or user_state[user_id].get('command') != 'upload_files':
-        send_message_with_topic(
-            chat_id=message.chat.id,
-            message_thread_id=message.message_thread_id,
-            text="❌ Нет активной загрузки файлов", 
-            reply_markup=create_main_keyboard()
-        )
-        return
-    
-    object_id = user_state[user_id]['object_id']
-    chat_id = user_state[user_id]['chat_id']
-    message_thread_id = user_state[user_id].get('message_thread_id')
-    files = user_state[user_id]['files']
-    file_types = user_state[user_id]['file_types']
-    
-    if not files:
-        send_message_with_topic(
-            chat_id=chat_id,
-            message_thread_id=message_thread_id,
-            text="❌ Не получено ни одного файла", 
-            reply_markup=create_main_keyboard()
-        )
-        del user_state[user_id]
-        return
-    
-    # Сохраняем файлы для объекта
-    object_files[object_id] = files
-    
-    # Сохраняем в архив (информация + все файлы)
-    save_to_archive(object_id, files, file_types)
-    
-    # Обновляем Google Sheets
-    update_google_sheets(object_id)
-    
-    # Очищаем состояние пользователя
-    del user_state[user_id]
-    
-    send_message_with_topic(
-        chat_id=chat_id,
-        message_thread_id=message_thread_id,
-        text=f"""
-✅ УСПЕХ!
-
-📁 Для объекта #{object_id} сохранено:
-📸 Фото: {file_types['photos']}
-📄 Документы: {file_types['documents']}  
-🎥 Видео: {file_types['videos']}
-📊 Всего: {len(files)} файлов
-
-💾 Все файлы сохранены в архив
-📈 Объект отмечен как обработанный
-        """.strip(),
-        reply_markup=create_main_keyboard()
-    )
 
 def download_object_files(message, object_id):
     """Отправляет файлы объекта пользователю в ту же тему"""
