@@ -67,6 +67,36 @@ def save_user_state(data):
     with open(USER_STATE_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
+# Функция для отправки сообщений с поддержкой тем
+def send_message_with_topic(chat_id, text, message_thread_id=None, reply_markup=None, parse_mode=None):
+    try:
+        if message_thread_id:
+            return bot.send_message(
+                chat_id=chat_id,
+                message_thread_id=message_thread_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode
+            )
+        else:
+            return bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode
+            )
+    except Exception as e:
+        print(f"Ошибка отправки сообщения: {e}")
+        # Если ошибка связана с topic, пробуем отправить без него
+        if "message thread not found" in str(e).lower():
+            return bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode
+            )
+        raise e
+
 # Инициализация данных
 objects_db = load_objects_from_excel()
 objects_data = load_objects_data()
@@ -99,10 +129,13 @@ def cancel_keyboard():
 # ========== КОМАНДЫ БОТА ==========
 @bot.message_handler(commands=['start'])
 def start_message(message):
-    bot.send_message(message.chat.id,
-                     "Привет! 👋 Я бот для управления проектом установки ИПУГ.\n"
-                     "Я помогу найти информацию об объектах и зафиксировать выполнение работ.",
-                     reply_markup=main_menu_keyboard())
+    send_message_with_topic(
+        chat_id=message.chat.id,
+        message_thread_id=message.message_thread_id,
+        text="Привет! 👋 Я бот для управления проектом установки ИПУГ.\n"
+             "Я помогу найти информацию об объектах и зафиксировать выполнение работ.",
+        reply_markup=main_menu_keyboard()
+    )
 
 @bot.message_handler(commands=['help'])
 def help_message(message):
@@ -119,16 +152,31 @@ def help_message(message):
 *Для монтажников:*
 Используйте /report_object, чтобы отчитаться о выполненной работе. Бот проведет вас по всем шагам.
     """
-    bot.send_message(message.chat.id, help_text, reply_markup=main_menu_keyboard())
+    send_message_with_topic(
+        chat_id=message.chat.id,
+        message_thread_id=message.message_thread_id,
+        text=help_text,
+        reply_markup=main_menu_keyboard()
+    )
 
 @bot.message_handler(commands=['objects'])
 def ask_object_number(message):
-    msg = bot.send_message(message.chat.id, "Введите номер(а) объекта(ов) через запятую:", reply_markup=cancel_keyboard())
+    msg = send_message_with_topic(
+        chat_id=message.chat.id,
+        message_thread_id=message.message_thread_id,
+        text="Введите номер(а) объекта(ов) через запятую:",
+        reply_markup=cancel_keyboard()
+    )
     bot.register_next_step_handler(msg, process_object_numbers)
 
 def process_object_numbers(message):
     if message.text.strip().lower() == 'отмена':
-        bot.send_message(message.chat.id, "Отменено.", reply_markup=main_menu_keyboard())
+        send_message_with_topic(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text="Отменено.",
+            reply_markup=main_menu_keyboard()
+        )
         return
 
     numbers = [num.strip() for num in message.text.split(',')]
@@ -157,27 +205,52 @@ def process_object_numbers(message):
         else:
             response += f"❌ Объект с номером {num} не найден.\n---\n"
 
-    bot.send_message(message.chat.id, response, parse_mode='Markdown', reply_markup=main_menu_keyboard())
+    send_message_with_topic(
+        chat_id=message.chat.id,
+        message_thread_id=message.message_thread_id,
+        text=response,
+        parse_mode='Markdown',
+        reply_markup=main_menu_keyboard()
+    )
 
 # ========== ПРОЦЕСС СДАЧИ ОБЪЕКТА ==========
 @bot.message_handler(commands=['report_object'])
 def start_object_report(message):
-    msg = bot.send_message(message.chat.id, "Введите номер объекта для отчета:", reply_markup=cancel_keyboard())
+    msg = send_message_with_topic(
+        chat_id=message.chat.id,
+        message_thread_id=message.message_thread_id,
+        text="Введите номер объекта для отчета:",
+        reply_markup=cancel_keyboard()
+    )
     bot.register_next_step_handler(msg, process_report_object_number)
 
 def process_report_object_number(message):
     if message.text.strip().lower() == 'отмена':
-        bot.send_message(message.chat.id, "Отменено.", reply_markup=main_menu_keyboard())
+        send_message_with_topic(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text="Отменено.",
+            reply_markup=main_menu_keyboard()
+        )
         return
 
     object_id = message.text.strip()
     if object_id not in objects_data:
-        msg = bot.send_message(message.chat.id, "Объект с таким номером не найден. Проверьте номер и введите снова:", reply_markup=cancel_keyboard())
+        msg = send_message_with_topic(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text="Объект с таким номером не найден. Проверьте номер и введите снова:",
+            reply_markup=cancel_keyboard()
+        )
         bot.register_next_step_handler(msg, process_report_object_number)
         return
 
-    # Сохраняем состояние пользователя
-    user_state[str(message.chat.id)] = {'object_id': object_id, 'step': 'waiting_photos'}
+    # Сохраняем состояние пользователя с информацией о теме
+    user_state[str(message.chat.id)] = {
+        'object_id': object_id, 
+        'step': 'waiting_photos',
+        'message_thread_id': message.message_thread_id  # Сохраняем ID темы
+    }
     save_user_state(user_state)
 
     # Запрашиваем фото
@@ -196,24 +269,45 @@ def process_report_object_number(message):
 
 *Отправьте все фотографии одним сообщением.*
     """
-    msg = bot.send_message(message.chat.id, photo_requirements, parse_mode='Markdown', reply_markup=cancel_keyboard())
+    msg = send_message_with_topic(
+        chat_id=message.chat.id,
+        message_thread_id=message.message_thread_id,
+        text=photo_requirements,
+        parse_mode='Markdown',
+        reply_markup=cancel_keyboard()
+    )
     bot.register_next_step_handler(msg, process_report_photos)
 
 def process_report_photos(message):
     user_id = str(message.chat.id)
     if user_id not in user_state:
-        bot.send_message(message.chat.id, "Сессия устарела. Начните заново с /report_object.", reply_markup=main_menu_keyboard())
+        send_message_with_topic(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text="Сессия устарела. Начните заново с /report_object.",
+            reply_markup=main_menu_keyboard()
+        )
         return
 
     if message.text and message.text.strip().lower() == 'отмена':
         del user_state[user_id]
         save_user_state(user_state)
-        bot.send_message(message.chat.id, "Отменено.", reply_markup=main_menu_keyboard())
+        send_message_with_topic(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text="Отменено.",
+            reply_markup=main_menu_keyboard()
+        )
         return
 
     # Проверяем, что прислали фото
     if message.photo is None:
-        msg = bot.send_message(message.chat.id, "Пожалуйста, отправьте фотографии. Если что-то пошло не так, введите 'Отмена'.", reply_markup=cancel_keyboard())
+        msg = send_message_with_topic(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text="Пожалуйста, отправьте фотографии. Если что-то пошло не так, введите 'Отмена'.",
+            reply_markup=cancel_keyboard()
+        )
         bot.register_next_step_handler(msg, process_report_photos)
         return
 
@@ -230,19 +324,34 @@ def process_report_photos(message):
     user_state[user_id]['step'] = 'waiting_status'
     save_user_state(user_state)
 
-    msg = bot.send_message(message.chat.id, "Фото получены. Теперь укажите статус объекта:", reply_markup=object_status_keyboard())
+    msg = send_message_with_topic(
+        chat_id=message.chat.id,
+        message_thread_id=message.message_thread_id,
+        text="Фото получены. Теперь укажите статус объекта:",
+        reply_markup=object_status_keyboard()
+    )
     bot.register_next_step_handler(msg, process_report_status)
 
 def process_report_status(message):
     user_id = str(message.chat.id)
     if user_id not in user_state:
-        bot.send_message(message.chat.id, "Сессия устарела. Начните заново с /report_object.", reply_markup=main_menu_keyboard())
+        send_message_with_topic(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text="Сессия устарела. Начните заново с /report_object.",
+            reply_markup=main_menu_keyboard()
+        )
         return
 
     if message.text.strip().lower() == 'отмена':
         del user_state[user_id]
         save_user_state(user_state)
-        bot.send_message(message.chat.id, "Отменено.", reply_markup=main_menu_keyboard())
+        send_message_with_topic(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text="Отменено.",
+            reply_markup=main_menu_keyboard()
+        )
         return
 
     object_id = user_state[user_id]['object_id']
@@ -256,7 +365,12 @@ def process_report_status(message):
     if new_status == 'Проблема':
         user_state[user_id]['step'] = 'waiting_problem_comment'
         save_user_state(user_state)
-        msg = bot.send_message(message.chat.id, "Опишите проблему:", reply_markup=cancel_keyboard())
+        msg = send_message_with_topic(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text="Опишите проблему:",
+            reply_markup=cancel_keyboard()
+        )
         bot.register_next_step_handler(msg, process_problem_comment)
     else:
         # Завершаем отчет
@@ -265,13 +379,23 @@ def process_report_status(message):
 def process_problem_comment(message):
     user_id = str(message.chat.id)
     if user_id not in user_state:
-        bot.send_message(message.chat.id, "Сессия устарела.", reply_markup=main_menu_keyboard())
+        send_message_with_topic(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text="Сессия устарела.",
+            reply_markup=main_menu_keyboard()
+        )
         return
 
     if message.text.strip().lower() == 'отмена':
         del user_state[user_id]
         save_user_state(user_state)
-        bot.send_message(message.chat.id, "Отменено.", reply_markup=main_menu_keyboard())
+        send_message_with_topic(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text="Отменено.",
+            reply_markup=main_menu_keyboard()
+        )
         return
 
     object_id = user_state[user_id]['object_id']
@@ -284,6 +408,9 @@ def process_problem_comment(message):
     finalize_object_report(message.chat.id, user_id, object_id)
 
 def finalize_object_report(chat_id, user_id, object_id):
+    # Получаем сохраненный ID темы
+    message_thread_id = user_state[user_id].get('message_thread_id')
+    
     # Завершаем процесс, чистим состояние
     del user_state[user_id]
     save_user_state(user_state)
@@ -291,11 +418,14 @@ def finalize_object_report(chat_id, user_id, object_id):
     obj_name = objects_data[object_id]['name']
     status = objects_data[object_id]['status']
 
-    bot.send_message(chat_id,
-                     f"✅ Отчет по объекту *{object_id} - {obj_name}* сохранен!\n"
-                     f"Статус установлен: *{status}*",
-                     parse_mode='Markdown',
-                     reply_markup=main_menu_keyboard())
+    send_message_with_topic(
+        chat_id=chat_id,
+        message_thread_id=message_thread_id,
+        text=f"✅ Отчет по объекту *{object_id} - {obj_name}* сохранен!\n"
+             f"Статус установлен: *{status}*",
+        parse_mode='Markdown',
+        reply_markup=main_menu_keyboard()
+    )
 
     # ОПОВЕЩЕНИЕ ДЛЯ ОФИСА/РУКОВОДИТЕЛЯ (можно вынести в отдельный чат)
     # admin_chat_id = os.environ.get("ADMIN_CHAT_ID")
@@ -307,9 +437,19 @@ def finalize_object_report(chat_id, user_id, object_id):
 def handle_all_messages(message):
     if message.text in ['В работе', 'Проблема', 'Ждет приемки']:
         # Если пользователь нажал на кнопку статуса вне контекста
-        bot.send_message(message.chat.id, "Чтобы изменить статус объекта, используйте команду /report_object", reply_markup=main_menu_keyboard())
+        send_message_with_topic(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text="Чтобы изменить статус объекта, используйте команду /report_object",
+            reply_markup=main_menu_keyboard()
+        )
     else:
-        bot.send_message(message.chat.id, "Я не понимаю эту команду. Используйте /help для списка команд.", reply_markup=main_menu_keyboard())
+        send_message_with_topic(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text="Я не понимаю эту команду. Используйте /help для списка команд.",
+            reply_markup=main_menu_keyboard()
+        )
 
 # ========== WEBHOOK ЛОГИКА (для Render) ==========
 @app.route('/' + TOKEN, methods=['POST'])
