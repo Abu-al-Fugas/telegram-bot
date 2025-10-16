@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 from flask import Flask, request
 import telebot
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # ========== НАСТРОЙКИ ==========
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -45,15 +45,25 @@ def send_file(chat_id, file_type, file_id, caption=None):
     elif file_type == "video":
         bot.send_video(chat_id, file_id, caption=caption)
 
-# ========== КЛАВИАТУРЫ ==========
-def main_keyboard():
-    kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("/info", "/photo", "/download", "/result", "/help")
+# ========== INLINE КЛАВИАТУРЫ ==========
+def upload_inline_keyboard():
+    kb = InlineKeyboardMarkup(row_width=3)
+    kb.add(
+        InlineKeyboardButton("✅ OK", callback_data="upload_ok"),
+        InlineKeyboardButton("➡️ Next", callback_data="upload_next"),
+        InlineKeyboardButton("❌ Cancel", callback_data="upload_cancel")
+    )
     return kb
 
-def upload_keyboard():
-    kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("/OK", "/next", "/cancel")
+def main_inline_keyboard():
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("/info", callback_data="cmd_info"),
+        InlineKeyboardButton("/photo", callback_data="cmd_photo"),
+        InlineKeyboardButton("/download", callback_data="cmd_download"),
+        InlineKeyboardButton("/result", callback_data="cmd_result"),
+        InlineKeyboardButton("/help", callback_data="cmd_help")
+    )
     return kb
 
 # ========== КОМАНДЫ ==========
@@ -67,7 +77,7 @@ def start_message(message):
         "/download - скачать файлы объекта\n"
         "/result - список обработанных объектов\n"
     )
-    send_message(message.chat.id, text, reply_markup=main_keyboard(), thread_id=message.message_thread_id)
+    send_message(message.chat.id, text, reply_markup=main_inline_keyboard(), thread_id=message.message_thread_id)
 
 @bot.message_handler(commands=['photo'])
 def start_upload(message):
@@ -75,15 +85,15 @@ def start_upload(message):
     send_message(message.chat.id, "Введите номер объекта для загрузки файлов:", thread_id=message.message_thread_id)
     user_state[key] = {'command': 'await_object'}
 
-# ========== ТЕКСТОВЫЕ СООБЩЕНИЯ ==========
+# ========== ОБРАБОТКА ТЕКСТА ==========
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
     key = make_key(message)
     state = user_state.get(key)
-
     if not state:
         return
 
+    # Ввод номера объекта
     if state['command'] == 'await_object':
         object_id = message.text.strip()
         if not object_id:
@@ -100,10 +110,11 @@ def handle_text(message):
             'thread_id': message.message_thread_id
         }
 
+        # Отправляем первый шаг с инлайн-кнопками
         send_message(
             message.chat.id,
             f"📸 Загрузите {steps[0]['name']}",
-            reply_markup=upload_keyboard(),
+            reply_markup=upload_inline_keyboard(),
             thread_id=message.message_thread_id
         )
 
@@ -126,25 +137,26 @@ def handle_files(message):
 
     send_message(message.chat.id, "✅ Файл сохранён.", thread_id=state['thread_id'])
 
-# ========== УПРАВЛЕНИЕ ЗАГРУЗКОЙ ==========
-@bot.message_handler(commands=['OK', 'next', 'cancel'])
-def handle_upload_control(message):
-    key = make_key(message)
+# ========== ОБРАБОТКА CALLBACK ==========
+@bot.callback_query_handler(func=lambda call: call.data.startswith("upload_"))
+def handle_upload_callback(call):
+    key = (call.message.chat.id, call.message.message_thread_id, call.from_user.id)
     state = user_state.get(key)
-    cmd = message.text.lower()
-
     if not state or state.get('command') != 'upload_steps':
-        send_message(message.chat.id, "❌ Нет активной загрузки.", reply_markup=main_keyboard(), thread_id=message.message_thread_id)
+        bot.answer_callback_query(call.id, "Нет активной загрузки")
         return
 
-    if cmd == '/cancel':
+    if call.data == "upload_ok":
+        advance_step(key)
+        bot.answer_callback_query(call.id, "Шаг завершён ✅")
+    elif call.data == "upload_next":
+        advance_step(key, skip=True)
+        bot.answer_callback_query(call.id, "Шаг пропущен ➡️")
+    elif call.data == "upload_cancel":
         obj = state.get('object_id', '')
         user_state.pop(key, None)
-        send_message(message.chat.id, f"❌ Загрузка для объекта {obj} отменена.", reply_markup=main_keyboard(), thread_id=message.message_thread_id)
-        return
-
-    skip = (cmd == '/next')
-    advance_step(key, skip=skip)
+        bot.edit_message_text(f"❌ Загрузка объекта {obj} отменена", call.message.chat.id, call.message.message_id)
+        bot.answer_callback_query(call.id, "Загрузка отменена ❌")
 
 # ========== ПРОГРЕСС ==========
 def advance_step(key, skip=False):
@@ -160,14 +172,14 @@ def advance_step(key, skip=False):
         for i, s in enumerate(all_steps, 1):
             report += f"{i}. {s['name']}: {len(s['files'])} файлов\n"
 
-        send_message(state['chat_id'], report, reply_markup=main_keyboard(), thread_id=state['thread_id'])
+        send_message(state['chat_id'], report, thread_id=state['thread_id'])
         user_state.pop(key)
     else:
         next_step = state['steps'][state['step_index']]
         send_message(
             state['chat_id'],
             f"📸 Загрузите {next_step['name']}",
-            reply_markup=upload_keyboard(),
+            reply_markup=upload_inline_keyboard(),
             thread_id=state['thread_id']
         )
 
