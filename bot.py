@@ -234,7 +234,7 @@ async def cmd_start(message: Message):
     )
     await message.answer(text, reply_markup=get_main_keyboard())
 
-@router.message(Command("photo")))
+@router.message(Command("photo"))
 async def cmd_photo(message: Message, state: FSMContext):
     # Сотрудники работают только из темы группы «Работа»
     if not is_from_work_topic(message):
@@ -243,7 +243,7 @@ async def cmd_photo(message: Message, state: FSMContext):
     await state.set_state(UploadStates.waiting_object_id)
     await message.answer("📝 Введите номер объекта для загрузки:")
 
-@router.message(Command("addphoto")))
+@router.message(Command("addphoto"))
 async def cmd_addphoto(message: Message, state: FSMContext):
     # Разрешаем: (а) из темы «Работа» (сотрудники), (б) из лички (админы)
     if message.chat.type in ("group", "supergroup") and not is_from_work_topic(message):
@@ -252,12 +252,12 @@ async def cmd_addphoto(message: Message, state: FSMContext):
     await state.set_state(AddPhotoStates.waiting_object_id)
     await message.answer("📝 Введите номер объекта, чтобы добавить фото:")
 
-@router.message(Command("download")))
+@router.message(Command("download"))
 async def cmd_download(message: Message, state: FSMContext):
     await state.set_state(DownloadStates.waiting_object_id)
     await message.answer("📝 Введите номер объекта для скачивания файлов:")
 
-@router.message(Command("result")))
+@router.message(Command("result"))
 async def cmd_result(message: Message):
     if not objects_data:
         await message.answer("📋 Нет завершённых загрузок в текущей сессии.", reply_markup=get_main_keyboard())
@@ -268,7 +268,7 @@ async def cmd_result(message: Message):
         text += f"• Объект {oid}: {total_files} файлов\n"
     await message.answer(text, reply_markup=get_main_keyboard())
 
-@router.message(Command("info")))
+@router.message(Command("info"))
 async def cmd_info(message: Message, state: FSMContext):
     await state.set_state(InfoStates.waiting_object_id)
     await message.answer("📝 Введите номер объекта для получения информации:", reply_markup=get_main_keyboard())
@@ -729,3 +729,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
