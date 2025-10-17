@@ -23,23 +23,24 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiohttp import web
 import openpyxl
 
-# ========== НАСТРОЙКИ ==========
+# ========= НАСТРОЙКИ =========
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
 
-ARCHIVE_CHAT_ID = int(os.environ.get("ARCHIVE_CHAT_ID", "-1003160855229"))
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://telegram-bot-b6pn.onrender.com")
+WORK_CHAT_ID = int(os.environ.get("WORK_CHAT_ID", "0"))           # группа-форум с темами
+ARCHIVE_CHAT_ID = int(os.environ.get("ARCHIVE_CHAT_ID", "0"))     # общая группа без тем
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 PORT = int(os.environ.get("PORT", 10000))
 DB_PATH = os.environ.get("DB_PATH", "files.db")
 
-# ========== ИНИЦИАЛИЗАЦИЯ БОТА ==========
+# ========= ИНИЦИАЛИЗАЦИЯ =========
 bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
 
-# ========== КОНСТАНТЫ ЧЕК-ЛИСТА ==========
+# ========= ЧЕК-ЛИСТ =========
 UPLOAD_STEPS = [
     "Общее фото помещения",
     "Фото корректора",
@@ -61,7 +62,7 @@ MANDATORY_STEPS = {
     "Фото места прокладки кабелей"
 }
 
-# ========== СОСТОЯНИЯ FSM ==========
+# ========= СОСТОЯНИЯ =========
 class UploadStates(StatesGroup):
     waiting_object_id = State()
     uploading_steps = State()
@@ -76,10 +77,10 @@ class DownloadStates(StatesGroup):
 class InfoStates(StatesGroup):
     waiting_object_id = State()
 
-# ========== ПАМЯТЬ СЕССИИ (для /result) ==========
+# для /result в текущей сессии
 objects_data = {}
 
-# ========== БД ==========
+# ========= БАЗА ДАННЫХ =========
 def init_db():
     with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
@@ -97,16 +98,9 @@ def init_db():
                 kind TEXT NOT NULL CHECK (kind IN ('photo','video','document')),
                 file_id TEXT NOT NULL,
                 author_id INTEGER,
+                author_name TEXT,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (object_id) REFERENCES objects(object_id) ON DELETE CASCADE
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS topics (
-                user_id INTEGER PRIMARY KEY,
-                chat_id INTEGER NOT NULL,
-                thread_id INTEGER NOT NULL,
-                linked_at TEXT NOT NULL
             )
         """)
         conn.commit()
@@ -117,15 +111,15 @@ def ensure_object(conn, object_id: str):
         (object_id, datetime.now().isoformat())
     )
 
-def save_files_to_db(object_id: str, step_name: str, files: list[dict], author_id: int | None):
+def save_files_to_db(object_id: str, step_name: str, files: list[dict], author_id: int | None, author_name: str | None):
     if not files:
         return
     with closing(sqlite3.connect(DB_PATH)) as conn:
         ensure_object(conn, object_id)
         conn.executemany(
-            "INSERT INTO files(object_id, step, kind, file_id, author_id, created_at) VALUES (?,?,?,?,?,?)",
+            "INSERT INTO files(object_id, step, kind, file_id, author_id, author_name, created_at) VALUES (?,?,?,?,?,?,?)",
             [
-                (object_id, step_name, f["type"], f["file_id"], author_id, datetime.now().isoformat())
+                (object_id, step_name, f["type"], f["file_id"], author_id, author_name, datetime.now().isoformat())
                 for f in files
             ]
         )
@@ -148,25 +142,7 @@ def has_object_in_db(object_id: str) -> bool:
         cur = conn.execute("SELECT 1 FROM objects WHERE object_id = ? LIMIT 1", (object_id,))
         return cur.fetchone() is not None
 
-def set_topic_for_user(user_id: int, chat_id: int, thread_id: int):
-    with closing(sqlite3.connect(DB_PATH)) as conn:
-        conn.execute(
-            "INSERT INTO topics(user_id, chat_id, thread_id, linked_at) VALUES (?,?,?,?) "
-            "ON CONFLICT(user_id) DO UPDATE SET chat_id=excluded.chat_id, thread_id=excluded.thread_id, linked_at=excluded.linked_at",
-            (user_id, chat_id, thread_id, datetime.now().isoformat())
-        )
-        conn.commit()
-
-def get_topic_for_user(user_id: int):
-    with closing(sqlite3.connect(DB_PATH)) as conn:
-        cur = conn.execute(
-            "SELECT chat_id, thread_id FROM topics WHERE user_id = ? LIMIT 1",
-            (user_id,)
-        )
-        row = cur.fetchone()
-        return (row[0], row[1]) if row else (None, None)
-
-# ========== КЛАВИАТУРЫ ==========
+# ========= КЛАВИАТУРЫ =========
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -200,46 +176,55 @@ def get_addphoto_keyboard():
         InlineKeyboardButton(text="❌ Отмена", callback_data="upload_cancel")
     ]])
 
-# ========== КОМАНДЫ ==========
+# ========= ХЕЛПЕРЫ КОНТЕКСТА =========
+def is_from_work_topic(msg: Message) -> bool:
+    """Сообщение из группы-форума 'Работа' и внутри темы (topic)"""
+    return (msg.chat and msg.chat.id == WORK_CHAT_ID) and bool(getattr(msg, "is_topic_message", False))
+
+def employee_fullname(msg: Message) -> str:
+    u = msg.from_user
+    return (u.full_name or u.username or str(u.id)) if u else "unknown"
+
+# ========= КОМАНДЫ =========
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     text = (
         "🤖 Бот для обследования объектов котельных\n\n"
+        "Где работать:\n"
+        "• Сотрудники — в своей теме внутри группы «Работа» (/photo, /addphoto)\n"
+        "• Админы — в личке (/download, /info, /result)\n\n"
         "Команды:\n"
-        "/photo – пошаговая загрузка по чек-листу\n"
-        "/addphoto – добавить файлы к объекту\n"
-        "/download – скачать файлы объекта (из БД)\n"
+        "/photo – пошаговая загрузка по чек-листу (только в теме «Работа»)\n"
+        "/addphoto – добавить файлы к объекту (в теме «Работа» или в личке админа)\n"
+        "/download – скачать все файлы объекта (из БД)\n"
         "/result – завершённые загрузки (текущая сессия)\n"
-        "/info – сведения об объекте из objects.xlsx\n"
-        "/settopic – привязать текущую Тему из группы Архив к вашему профилю"
+        "/info – сведения об объекте из objects.xlsx"
     )
     await message.answer(text, reply_markup=get_main_keyboard())
 
-@router.message(Command("settopic"))
-async def cmd_settopic(message: Message):
-    """Выполнить ЭТУ команду НУЖНО внутри группы Архив, находясь в нужной теме."""
-    if message.chat.id != ARCHIVE_CHAT_ID:
-        await message.answer("Эту команду нужно выполнять в группе Архив, внутри нужной темы (topic).")
-        return
-    if not getattr(message, "is_topic_message", False):
-        await message.answer("Команда должна выполняться внутри темы (topic) группы Архив.")
-        return
-    thread_id = message.message_thread_id
-    set_topic_for_user(message.from_user.id, ARCHIVE_CHAT_ID, thread_id)
-    await message.answer(f"✅ Тема привязана к пользователю @{message.from_user.username or message.from_user.id} (thread_id={thread_id}).")
-
 @router.message(Command("photo"))
 async def cmd_photo(message: Message, state: FSMContext):
+    # Сотрудники работают только из темы группы «Работа»
+    if not is_from_work_topic(message):
+        await message.answer("📍 Эту команду нужно выполнять в группе «Работа», **внутри вашей темы**.")
+        return
+
     await state.set_state(UploadStates.waiting_object_id)
     await message.answer("📝 Введите номер объекта для загрузки:", reply_markup=get_main_keyboard())
 
 @router.message(Command("addphoto"))
 async def cmd_addphoto(message: Message, state: FSMContext):
+    # Разрешаем: (а) из темы «Работа» (сотрудники), (б) из лички (админы)
+    if message.chat.type in ("group", "supergroup") and not is_from_work_topic(message):
+        await message.answer("📍 Добавлять фото можно в вашей теме группы «Работа», либо в личке с ботом (для админа).")
+        return
+
     await state.set_state(AddPhotoStates.waiting_object_id)
     await message.answer("📝 Введите номер объекта, чтобы добавить фото:", reply_markup=get_main_keyboard())
 
 @router.message(Command("download"))
 async def cmd_download(message: Message, state: FSMContext):
+    # /download можно в личке или где угодно (при желании можно ограничить)
     await state.set_state(DownloadStates.waiting_object_id)
     await message.answer("📝 Введите номер объекта для скачивания файлов:", reply_markup=get_main_keyboard())
 
@@ -259,19 +244,37 @@ async def cmd_info(message: Message, state: FSMContext):
     await state.set_state(InfoStates.waiting_object_id)
     await message.answer("📝 Введите номер объекта для получения информации:", reply_markup=get_main_keyboard())
 
-# ========== ОБРАБОТКА ИД ОБЪЕКТА ==========
+# ========= ОБРАБОТКА ИД ОБЪЕКТА =========
 @router.message(UploadStates.waiting_object_id)
 async def process_upload_object_id(message: Message, state: FSMContext):
+    if not is_from_work_topic(message):
+        await message.answer("📍 Загрузка чек-листа доступна только из вашей темы в группе «Работа».")
+        await state.clear()
+        return
+
     object_id = message.text.strip()
     steps = [{"name": s, "files": []} for s in UPLOAD_STEPS]
-    await state.update_data(object_id=object_id, steps=steps, step_index=0, last_message_id=None)
+    await state.update_data(
+        object_id=object_id,
+        steps=steps,
+        step_index=0,
+        last_message_id=None,
+        author_id=message.from_user.id if message.from_user else None,
+        author_name=employee_fullname(message)
+    )
     await state.set_state(UploadStates.uploading_steps)
     await send_upload_step(message, state)
 
 @router.message(AddPhotoStates.waiting_object_id)
 async def process_addphoto_object_id(message: Message, state: FSMContext):
     object_id = message.text.strip()
-    await state.update_data(object_id=object_id, files=[], last_message_id=None)
+    await state.update_data(
+        object_id=object_id,
+        files=[],
+        last_message_id=None,
+        author_id=message.from_user.id if message.from_user else None,
+        author_name=employee_fullname(message)
+    )
     await state.set_state(AddPhotoStates.uploading_files)
     msg = await message.answer(
         f"📸 Отправьте файлы для объекта {object_id}.\nКогда закончите, нажмите ✅ Завершить.",
@@ -302,7 +305,7 @@ async def process_download_object_id(message: Message, state: FSMContext):
         for step_name, files in by_step.items():
             await message.answer(f"📁 {step_name}")
 
-            # Фото/видео альбомами (Telegram альбом 2..10 элементов)
+            # Фото/видео альбомами (альбом 2..10 элементов)
             pv = [f for f in files if f["type"] in ("photo", "video")]
             i = 0
             while i < len(pv):
@@ -361,9 +364,14 @@ async def process_info_object_id(message: Message, state: FSMContext):
         await message.answer(f"❌ Ошибка при чтении файла: {e}", reply_markup=get_main_keyboard())
     await state.clear()
 
-# ========== ОБРАБОТКА ФАЙЛОВ ==========
+# ========= ОБРАБОТКА ФАЙЛОВ =========
 @router.message(UploadStates.uploading_steps, F.photo | F.video | F.document)
 async def handle_upload_files(message: Message, state: FSMContext):
+    # Разрешаем приёмы файлов для чек-листа только из темы «Работа»
+    if not is_from_work_topic(message):
+        await message.answer("📍 Отправлять файлы чек-листа можно только в вашей теме группы «Работа».")
+        return
+
     data = await state.get_data()
     step_index = data["step_index"]
     steps = data["steps"]
@@ -380,7 +388,6 @@ async def handle_upload_files(message: Message, state: FSMContext):
     if file_info:
         current_step["files"].append(file_info)
 
-    # Обновляем кнопки
     if data.get("last_message_id"):
         try:
             await bot.delete_message(message.chat.id, data["last_message_id"])
@@ -406,16 +413,16 @@ async def handle_addphoto_files(message: Message, state: FSMContext):
         files.append(file_info)
         await state.update_data(files=files)
 
-# ========== CALLBACKS ==========
+# ========= CALLBACKS =========
 @router.callback_query(F.data == "upload_ok")
 async def callback_upload_ok(callback: CallbackQuery, state: FSMContext):
     await callback.answer("✅ Шаг завершён")
-    await advance_step(callback.message, state, author_id=callback.from_user.id)
+    await advance_step(callback.message, state, author_id=callback.from_user.id, author_name=employee_fullname(callback.message))
 
 @router.callback_query(F.data == "upload_next")
 async def callback_upload_next(callback: CallbackQuery, state: FSMContext):
     await callback.answer("➡️ Пропущено")
-    await advance_step(callback.message, state, skip=True, author_id=callback.from_user.id)
+    await advance_step(callback.message, state, skip=True, author_id=callback.from_user.id, author_name=employee_fullname(callback.message))
 
 @router.callback_query(F.data == "upload_cancel")
 async def callback_upload_cancel(callback: CallbackQuery, state: FSMContext):
@@ -434,16 +441,18 @@ async def callback_addphoto_done(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     object_id = data["object_id"]
     files = data["files"]
+    author_id = data.get("author_id") or (callback.from_user.id if callback.from_user else None)
+    author_name = data.get("author_name") or employee_fullname(callback.message)
 
     if not files:
         await callback.answer("❌ Не загружено ни одного файла")
         return
 
     # Сохраняем в БД
-    save_files_to_db(object_id, "Дополнительные файлы", files, author_id=callback.from_user.id)
+    save_files_to_db(object_id, "Дополнительные файлы", files, author_id=author_id, author_name=author_name)
 
-    # Пишем в архив (по теме сотрудника)
-    await post_to_archive(object_id, [{"name": "Дополнительные файлы", "files": files}], author_id=callback.from_user.id)
+    # Публикация в «Архив» (без тем)
+    await post_to_archive(object_id, [{"name": "Дополнительные файлы", "files": files}], author_name=author_name, author_id=author_id)
 
     await state.clear()
     try:
@@ -456,7 +465,7 @@ async def callback_addphoto_done(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer("Готово ✅")
 
-# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+# ========= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =========
 async def send_upload_step(message: Message, state: FSMContext):
     data = await state.get_data()
     step_index = data["step_index"]
@@ -475,23 +484,21 @@ async def send_upload_step(message: Message, state: FSMContext):
     )
     await state.update_data(last_message_id=msg.message_id)
 
-async def advance_step(message: Message, state: FSMContext, skip=False, author_id: int | None = None):
+async def advance_step(message: Message, state: FSMContext, skip=False, author_id: int | None = None, author_name: str | None = None):
     data = await state.get_data()
     step_index = data["step_index"]
     steps = data["steps"]
     object_id = data["object_id"]
 
-    # Если НЕ пропускаем — сохраняем файлы текущего шага
     current = steps[step_index]
     if not skip and current["files"]:
-        save_files_to_db(object_id, current["name"], current["files"], author_id=author_id)
+        save_files_to_db(object_id, current["name"], current["files"], author_id=author_id, author_name=author_name)
 
-    # Переходим к следующему
     step_index += 1
     if step_index >= len(steps):
-        # Финал: постим весь комплект в архив (по теме сотрудника) и очищаем
-        await post_to_archive(object_id, steps, author_id=author_id)
-        objects_data[object_id] = {"steps": steps}  # для /result (сессия)
+        # Публикуем комплект в «Архив»
+        await post_to_archive(object_id, steps, author_name=author_name, author_id=author_id)
+        objects_data[object_id] = {"steps": steps}
         total_files = sum(len(s["files"]) for s in steps)
 
         try:
@@ -507,29 +514,23 @@ async def advance_step(message: Message, state: FSMContext, skip=False, author_i
         await state.update_data(step_index=step_index)
         await send_upload_step(message, state)
 
-async def post_to_archive(object_id: str, steps: list, author_id: int | None):
-    """Отправляет инфо и файлы в группу Архив в ТЕМУ, привязанную к автору."""
+async def post_to_archive(object_id: str, steps: list, author_name: str | None, author_id: int | None):
+    """Публикуем в ОБЩУЮ группу «Архив» (без тем) — аккуратно по шагам."""
     try:
-        chat_id, thread_id = get_topic_for_user(author_id) if author_id else (None, None)
-        # Если тема не привязана, шлём в общий чат (без thread_id)
-        kwargs = {}
-        if chat_id == ARCHIVE_CHAT_ID and thread_id:
-            kwargs["message_thread_id"] = thread_id
-
         header = (
             f"💾 ОБЪЕКТ #{object_id}\n"
-            f"👤 Исполнитель: {author_id}\n"
+            f"👤 Исполнитель: {author_name or author_id}\n"
             f"🕒 {datetime.now().strftime('%d.%m.%Y %H:%M')}"
         )
-        await bot.send_message(ARCHIVE_CHAT_ID, header, **kwargs)
+        await bot.send_message(ARCHIVE_CHAT_ID, header)
 
         for step in steps:
             files = step["files"]
             if not files:
                 continue
-            await bot.send_message(ARCHIVE_CHAT_ID, f"📁 {step['name']}", **kwargs)
+            await bot.send_message(ARCHIVE_CHAT_ID, f"📁 {step['name']}")
 
-            # Фото+видео альбомами
+            # Фото+видео — альбомами (2..10)
             pv = [f for f in files if f["type"] in ("photo", "video")]
             i = 0
             while i < len(pv):
@@ -537,9 +538,9 @@ async def post_to_archive(object_id: str, steps: list, author_id: int | None):
                 if len(batch) == 1:
                     f = batch[0]
                     if f["type"] == "photo":
-                        await bot.send_photo(ARCHIVE_CHAT_ID, f["file_id"], **kwargs)
+                        await bot.send_photo(ARCHIVE_CHAT_ID, f["file_id"])
                     else:
-                        await bot.send_video(ARCHIVE_CHAT_ID, f["file_id"], **kwargs)
+                        await bot.send_video(ARCHIVE_CHAT_ID, f["file_id"])
                 else:
                     media = []
                     for f in batch:
@@ -547,51 +548,55 @@ async def post_to_archive(object_id: str, steps: list, author_id: int | None):
                             media.append(InputMediaPhoto(media=f["file_id"]))
                         else:
                             media.append(InputMediaVideo(media=f["file_id"]))
-                    await bot.send_media_group(ARCHIVE_CHAT_ID, media, **kwargs)
+                    await bot.send_media_group(ARCHIVE_CHAT_ID, media)
                 i += len(batch)
 
             # Документы — по одному
             docs = [f for f in files if f["type"] == "document"]
             for d in docs:
-                await bot.send_document(ARCHIVE_CHAT_ID, d["file_id"], **kwargs)
+                await bot.send_document(ARCHIVE_CHAT_ID, d["file_id"])
 
     except Exception as e:
         print(f"[post_to_archive] Ошибка: {e}")
 
-# ========== WEBHOOK ==========
+# ========= WEBHOOK =========
 async def on_startup():
     init_db()
+    if not WEBHOOK_URL:
+        raise RuntimeError("WEBHOOK_URL is not set")
     webhook_url = f"{WEBHOOK_URL}/{TOKEN}"
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(webhook_url)
 
     commands = [
-        BotCommand(command="start", description="Перезапуск/справка"),
-        BotCommand(command="photo", description="Загрузить файлы по чек-листу"),
+        BotCommand(command="start", description="Справка"),
+        BotCommand(command="photo", description="Загрузить файлы по чек-листу (в теме «Работа»)"),
         BotCommand(command="addphoto", description="Добавить файлы к объекту"),
         BotCommand(command="download", description="Скачать файлы объекта"),
-        BotCommand(command="result", description="Результаты загрузок"),
+        BotCommand(command="result", description="Результаты загрузок (сессия)"),
         BotCommand(command="info", description="Информация об объекте"),
-        BotCommand(command="settopic", description="Привязать текущую тему Архива к пользователю"),
     ]
     await bot.set_my_commands(commands)
-    print("🚀 Бот запущен с webhook:", webhook_url)
+    print("🚀 Webhook установлен:", webhook_url)
 
 async def on_shutdown():
     await bot.session.close()
 
 async def handle_webhook(request):
-    """Очень важно: обрабатываем апдейт В ФОНЕ, чтобы мгновенно вернуть 200 OK и Telegram не делал повторов."""
+    """
+    Важно: сразу отдаём 200 OK, а апдейт обрабатываем в фоне,
+    чтобы Telegram не ретраил апдейт (из-за долгой отправки множества сообщений).
+    """
     update = await request.json()
     from aiogram.types import Update
     telegram_update = Update(**update)
-    asyncio.create_task(dp.feed_update(bot, telegram_update))  # фоновая обработка
+    asyncio.create_task(dp.feed_update(bot, telegram_update))
     return web.Response(text="OK")
 
 async def health_check(request):
     return web.Response(text="🤖 OK")
 
-# ========== ЗАПУСК ==========
+# ========= ЗАПУСК =========
 def main():
     dp.include_router(router)
     app = web.Application()
