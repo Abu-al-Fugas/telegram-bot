@@ -88,25 +88,36 @@ def get_main_keyboard():
     return keyboard
 
 def get_upload_keyboard(step_name, has_files=False):
-    """Inline-клавиатура для шагов загрузки"""
+    """
+    Исправленная inline-клавиатура для шагов загрузки
+    
+    Логика:
+    - Если файлы загружены (has_files=True): показываем ✅ Завершить и ❌ Отмена
+    - Если файлы НЕ загружены (has_files=False):
+      - Для обязательных шагов: только ❌ Отмена
+      - Для необязательных шагов: ➡️ След. и ❌ Отмена
+    """
     buttons = []
     
     if has_files:
-        # После загрузки файла показываем только ✅ и ❌
+        # После загрузки файла показываем ✅ Завершить и ❌ Отмена
         buttons.append([
             InlineKeyboardButton(text="✅ Завершить", callback_data="upload_ok"),
             InlineKeyboardButton(text="❌ Отмена", callback_data="upload_cancel")
         ])
     else:
         # До загрузки файла
-        row = [InlineKeyboardButton(text="✅ Завершить", callback_data="upload_ok")]
-        
-        # Добавляем кнопку "След." только для необязательных шагов
-        if step_name not in MANDATORY_STEPS:
-            row.append(InlineKeyboardButton(text="➡️ След.", callback_data="upload_next"))
-        
-        row.append(InlineKeyboardButton(text="❌ Отмена", callback_data="upload_cancel"))
-        buttons.append(row)
+        if step_name in MANDATORY_STEPS:
+            # Для ОБЯЗАТЕЛЬНЫХ шагов - только кнопка "Отмена"
+            buttons.append([
+                InlineKeyboardButton(text="❌ Отмена", callback_data="upload_cancel")
+            ])
+        else:
+            # Для НЕОБЯЗАТЕЛЬНЫХ шагов - кнопки "След." и "Отмена"
+            buttons.append([
+                InlineKeyboardButton(text="➡️ След.", callback_data="upload_next"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data="upload_cancel")
+            ])
     
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -327,7 +338,7 @@ async def handle_upload_files(message: Message, state: FSMContext):
         except:
             pass
     
-    # Отправляем новое сообщение с кнопками (после загрузки файла)
+    # Отправляем новое сообщение с кнопками (ПОСЛЕ загрузки файла has_files=True)
     msg = await message.answer(
         "Выберите действие:",
         reply_markup=get_upload_keyboard(current_step["name"], has_files=True)
@@ -425,8 +436,11 @@ async def send_upload_step(message: Message, state: FSMContext):
         except:
             pass
     
+    # Определяем статус шага
+    step_status = "🔴 ОБЯЗАТЕЛЬНЫЙ" if current_step["name"] in MANDATORY_STEPS else "🟡 Необязательный"
+    
     msg = await message.answer(
-        f"📸 Отправьте {current_step['name']}",
+        f"📸 Отправьте {current_step['name']}\n{step_status}",
         reply_markup=get_upload_keyboard(current_step["name"], has_files=False)
     )
     
