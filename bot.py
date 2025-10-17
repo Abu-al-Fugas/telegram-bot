@@ -88,15 +88,7 @@ def get_main_keyboard():
     return keyboard
 
 def get_upload_keyboard(step_name, has_files=False):
-    """
-    Исправленная inline-клавиатура для шагов загрузки
-    
-    Логика:
-    - Если файлы загружены (has_files=True): показываем ✅ Завершить и ❌ Отмена
-    - Если файлы НЕ загружены (has_files=False):
-      - Для обязательных шагов: только ❌ Отмена
-      - Для необязательных шагов: ➡️ След. и ❌ Отмена
-    """
+    """Inline-клавиатура для шагов загрузки"""
     buttons = []
     
     if has_files:
@@ -173,10 +165,10 @@ async def cmd_download(message: Message, state: FSMContext):
 @router.message(Command("result"))
 async def cmd_result(message: Message):
     if not objects_data:
-        await message.answer("📋 Нет завершённых загрузок.", reply_markup=get_main_keyboard())
+        await message.answer("📋 Нет завершённых загрузок в текущей сессии.", reply_markup=get_main_keyboard())
         return
     
-    text = "✅ Завершённые загрузки:\n"
+    text = "✅ Завершённые загрузки (текущая сессия):\n"
     for oid, data in objects_data.items():
         total_files = sum(len(s["files"]) for s in data["steps"])
         text += f"• Объект {oid}: {total_files} файлов\n"
@@ -227,46 +219,103 @@ async def process_addphoto_object_id(message: Message, state: FSMContext):
 
 @router.message(DownloadStates.waiting_object_id)
 async def process_download_object_id(message: Message, state: FSMContext):
+    """Извлечение файлов из архивного чата по номеру объекта"""
     object_id = message.text.strip()
     
-    if object_id not in objects_data:
+    await message.answer(f"🔍 Ищу файлы объекта {object_id} в архиве...")
+    
+    try:
+        # Ищем сообщения в архивном чате с номером объекта
+        found_messages = []
+        files_count = 0
+        
+        # Получаем последние 1000 сообщений из архивного чата
+        # Telegram API ограничивает получение истории, поэтому используем поиск
+        offset_id = 0
+        search_limit = 100  # Количество сообщений для поиска
+        
+        # Пытаемся найти сообщение с заголовком объекта
+        async for msg in bot.iter_history(ARCHIVE_CHAT_ID, limit=search_limit):
+            if msg.text and f"ОБЪЕКТ #{object_id}" in msg.text:
+                found_messages.append(msg)
+                # Начинаем собирать файлы после найденного заголовка
+                offset_id = msg.message_id
+                break
+        
+        if not found_messages:
+            await message.answer(
+                f"❌ Объект {object_id} не найден в архиве.",
+                reply_markup=get_main_keyboard()
+            )
+            await state.clear()
+            return
+        
+        # Собираем все сообщения после заголовка до следующего объекта
+        collecting = True
+        async for msg in bot.iter_history(ARCHIVE_CHAT_ID, offset_id=offset_id, limit=200):
+            if msg.message_id == offset_id:
+                continue
+            
+            # Если встретили новый объект, прекращаем сбор
+            if msg.text and "ОБЪЕКТ #" in msg.text and f"#{object_id}" not in msg.text:
+                break
+            
+            # Собираем файлы
+            if msg.photo or msg.document or msg.video or msg.media_group_id:
+                found_messages.append(msg)
+                files_count += 1
+        
+        if files_count == 0:
+            await message.answer(
+                f"❌ Файлы для объекта {object_id} не найдены в архиве.",
+                reply_markup=get_main_keyboard()
+            )
+            await state.clear()
+            return
+        
+        # Пересылаем все найденные файлы пользователю
+        await message.answer(f"📂 Найдено файлов: {files_count}. Отправляю...")
+        
+        media_group_ids = set()
+        for msg in reversed(found_messages):
+            try:
+                # Пропускаем текстовые сообщения (заголовки)
+                if msg.text and not msg.photo and not msg.document and not msg.video:
+                    if "📁" in msg.text:
+                        await message.answer(msg.text)
+                    continue
+                
+                # Обрабатываем медиа-группы (альбомы)
+                if msg.media_group_id and msg.media_group_id not in media_group_ids:
+                    media_group_ids.add(msg.media_group_id)
+                    await bot.copy_message(
+                        chat_id=message.chat.id,
+                        from_chat_id=ARCHIVE_CHAT_ID,
+                        message_id=msg.message_id
+                    )
+                elif not msg.media_group_id:
+                    # Обычные одиночные файлы
+                    await bot.copy_message(
+                        chat_id=message.chat.id,
+                        from_chat_id=ARCHIVE_CHAT_ID,
+                        message_id=msg.message_id
+                    )
+            except Exception as e:
+                print(f"Ошибка при пересылке сообщения {msg.message_id}: {e}")
+                continue
+        
         await message.answer(
-            f"❌ Объект {object_id} не найден в базе.",
+            f"✅ Все файлы объекта {object_id} отправлены.",
             reply_markup=get_main_keyboard()
         )
-        await state.clear()
-        return
-    
-    await message.answer(f"📂 Загружаю файлы объекта {object_id}...")
-    
-    # Отправляем все файлы объекта
-    data = objects_data[object_id]
-    for step in data["steps"]:
-        if not step["files"]:
-            continue
         
-        await message.answer(f"📁 {step['name']}")
-        
-        # Отправляем файлы группами по 10
-        for i in range(0, len(step["files"]), 10):
-            batch = step["files"][i:i+10]
-            media = []
-            
-            for file_info in batch:
-                if file_info["type"] == "photo":
-                    media.append(InputMediaPhoto(media=file_info["file_id"]))
-                elif file_info["type"] == "video":
-                    media.append(InputMediaVideo(media=file_info["file_id"]))
-                elif file_info["type"] == "document":
-                    media.append(InputMediaDocument(media=file_info["file_id"]))
-            
-            if media:
-                await bot.send_media_group(message.chat.id, media)
+    except Exception as e:
+        print(f"[process_download_object_id] Ошибка: {e}")
+        await message.answer(
+            f"❌ Произошла ошибка при поиске файлов: {e}",
+            reply_markup=get_main_keyboard()
+        )
     
-    await message.answer(
-        f"✅ Все файлы объекта {object_id} отправлены.",
-        reply_markup=get_main_keyboard()
-    )
     await state.clear()
 
 @router.message(InfoStates.waiting_object_id)
@@ -406,7 +455,7 @@ async def callback_addphoto_done(callback: CallbackQuery, state: FSMContext):
     if object_id not in objects_data:
         objects_data[object_id] = {"steps": []}
     
-    await save_to_archive(object_id, [{"name": "Дополнительные файлы", "files": files}], append=True)
+    await save_to_archive(object_id, [{"name": "Дополнительные файлы", "files": files}])
     
     await state.clear()
     
@@ -436,11 +485,8 @@ async def send_upload_step(message: Message, state: FSMContext):
         except:
             pass
     
-    # Определяем статус шага
-    step_status = "🔴 ОБЯЗАТЕЛЬНЫЙ" if current_step["name"] in MANDATORY_STEPS else "🟡 Необязательный"
-    
     msg = await message.answer(
-        f"📸 Отправьте {current_step['name']}\n{step_status}",
+        f"📸 Отправьте {current_step['name']}",
         reply_markup=get_upload_keyboard(current_step["name"], has_files=False)
     )
     
@@ -477,7 +523,7 @@ async def advance_step(message: Message, state: FSMContext, skip=False):
         await state.update_data(step_index=step_index)
         await send_upload_step(message, state)
 
-async def save_to_archive(object_id: str, steps: list, append: bool = False):
+async def save_to_archive(object_id: str, steps: list):
     """Сохранение файлов в архивный чат"""
     try:
         # Отправляем информационное сообщение
@@ -507,9 +553,6 @@ async def save_to_archive(object_id: str, steps: list, append: bool = False):
                 
                 if media:
                     await bot.send_media_group(ARCHIVE_CHAT_ID, media)
-        
-        if append and object_id in objects_data:
-            objects_data[object_id]["steps"].extend(steps)
     
     except Exception as e:
         print(f"[save_to_archive] Ошибка: {e}")
