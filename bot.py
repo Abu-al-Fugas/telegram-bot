@@ -192,7 +192,7 @@ async def check_add_object(m: Message, state: FSMContext):
     if ok:
         await state.update_data(object=obj, files=[])
         await state.set_state(AddPhoto.uploading)
-        await m.answer(f"📸 Отправьте дополнительные файлы для объекта {obj}.", reply_markup=step_kb('', True))
+        await m.answer("📸 Отправьте дополнительные файлы для объекта.", reply_markup=step_kb('', True))
     else:
         await m.answer(f"❌ Объект {obj} не найден.")
         await state.clear()
@@ -205,7 +205,6 @@ async def handle_upload(m: Message, state: FSMContext):
     steps = data["steps"]
     cur = steps[step_i]
 
-    # определяем тип файла
     if m.photo:
         cur["files"].append({"type": "photo", "file_id": m.photo[-1].file_id})
     elif m.video:
@@ -213,15 +212,13 @@ async def handle_upload(m: Message, state: FSMContext):
     elif m.document:
         cur["files"].append({"type": "document", "file_id": m.document.file_id})
 
-    # удаляем старое служебное сообщение
     if data.get("last_msg"):
         try:
             await bot.delete_message(m.chat.id, data["last_msg"])
         except:
             pass
 
-    # показываем новые кнопки
-    msg = await m.answer(reply_markup=step_kb(cur["name"], has_files=True))
+    msg = await m.answer("Выберите", reply_markup=step_kb(cur["name"], has_files=True))
     await state.update_data(steps=steps, last_msg=msg.message_id)
 
 @router.message(AddPhoto.uploading, F.photo | F.video | F.document)
@@ -354,7 +351,9 @@ async def on_startup():
         BotCommand(command="start", description="Перезапуск бота"),
         BotCommand(command="photo", description="Загрузить фото по объекту"),
         BotCommand(command="addphoto", description="Добавить фото"),
-        BotCommand(command="download", description="Скачать файлы объекта")
+        BotCommand(command="download", description="Скачать файлы объекта"),
+        BotCommand(command="result", description="Завершённые загрузки (сессия)"),
+        BotCommand(command="info", description="Информация об объекте")
     ])
     print("✅ Webhook установлен:", webhook_url)
 
