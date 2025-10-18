@@ -21,8 +21,8 @@ from aiogram.exceptions import TelegramRetryAfter
 
 # === НАСТРОЙКИ ===
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-WORK_CHAT_ID = int(os.environ.get("WORK_CHAT_ID", "0"))
-ARCHIVE_CHAT_ID = int(os.environ.get("ARCHIVE_CHAT_ID", "0"))
+WORK_CHAT_ID = int(os.environ.get("WORK_CHAT_ID", "0"))       # id рабочей группы (с темами)
+ARCHIVE_CHAT_ID = int(os.environ.get("ARCHIVE_CHAT_ID", "0")) # id группы Архив (без тем)
 WEBHOOK_URL = "https://telegram-bot-b6pn.onrender.com"
 PORT = int(os.environ.get("PORT", 10000))
 DB_PATH = "files.db"
@@ -217,7 +217,7 @@ async def handle_upload(m: Message, state: FSMContext):
         group_id = m.media_group_id
         media_groups.setdefault(group_id, []).append(file_info)
         await state.update_data(media_groups=media_groups)
-        await asyncio.sleep(1.2)
+        await asyncio.sleep(1.2)  # ждём, пока Telegram пришлёт весь альбом
 
         data = await state.get_data()
         media_groups = data.get("media_groups", {})
@@ -368,9 +368,10 @@ async def on_startup():
     print("✅ Webhook установлен:", webhook_url)
 
 async def handle_webhook(req):
+    # ВЕРНУЛ, КАК БЫЛО — без model_validate
     from aiogram.types import Update
     data = await req.json()
-    update = Update.model_validate(data)
+    update = Update(**data)
     asyncio.create_task(dp.feed_update(bot, update))
     return web.Response(text="OK")
 
