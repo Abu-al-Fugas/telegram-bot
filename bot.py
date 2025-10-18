@@ -173,6 +173,31 @@ async def cmd_download(m: Message, state: FSMContext):
     await m.answer("📝 Введите номер объекта:")
 
 # ========== ПРОВЕРКА ОБЪЕКТА ==========
+@router.message(Upload.waiting_object)
+async def check_upload_object(m: Message, state: FSMContext):
+    obj = m.text.strip()
+    ok, name = check_object_excel(obj)
+    if ok:
+        await state.update_data(object=obj, step=0, steps=[{"name": s, "files": []} for s in UPLOAD_STEPS])
+        await state.set_state(Upload.uploading)
+        await send_step(m, state)
+    else:
+        await m.answer(f"❌ Объект {obj} не найден.")
+        await state.clear()
+
+@router.message(AddPhoto.waiting_object)
+async def check_add_object(m: Message, state: FSMContext):
+    obj = m.text.strip()
+    ok, name = check_object_excel(obj)
+    if ok:
+        await state.update_data(object=obj, files=[])
+        await state.set_state(AddPhoto.uploading)
+        await m.answer("📸 Отправьте дополнительные файлы для объекта.", reply_markup=step_kb('', True))
+    else:
+        await m.answer(f"❌ Объект {obj} не найден.")
+        await state.clear()
+
+# ========== ПРИЁМ ФАЙЛОВ ==========
 @router.message(Upload.uploading, F.photo | F.video | F.document)
 async def handle_upload(m: Message, state: FSMContext):
     data = await state.get_data()
