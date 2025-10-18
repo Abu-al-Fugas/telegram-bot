@@ -212,13 +212,12 @@ async def handle_upload(m: Message, state: FSMContext):
     elif m.document:
         file_info = {"type": "document", "file_id": m.document.file_id}
 
-    # медиагруппа
     if m.media_group_id:
         media_groups = data.get("media_groups", {})
         group_id = m.media_group_id
         media_groups.setdefault(group_id, []).append(file_info)
         await state.update_data(media_groups=media_groups)
-        await asyncio.sleep(1.2)  # ждём пока придут все элементы
+        await asyncio.sleep(1.2)
 
         data = await state.get_data()
         media_groups = data.get("media_groups", {})
@@ -232,7 +231,6 @@ async def handle_upload(m: Message, state: FSMContext):
             msg = await m.answer("Выберите", reply_markup=step_kb(cur["name"], has_files=True))
             await state.update_data(steps=steps, last_msg=msg.message_id, media_groups=media_groups)
     else:
-        # одиночный файл
         cur["files"].append(file_info)
         if data.get("last_msg"):
             try:
@@ -370,9 +368,10 @@ async def on_startup():
     print("✅ Webhook установлен:", webhook_url)
 
 async def handle_webhook(req):
-    data = await req.json()
     from aiogram.types import Update
-    asyncio.create_task(dp.feed_update(bot, Update(**data)))
+    data = await req.json()
+    update = Update.model_validate(data)
+    asyncio.create_task(dp.feed_update(bot, update))
     return web.Response(text="OK")
 
 async def health(req):
