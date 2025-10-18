@@ -66,9 +66,6 @@ class AddPhoto(StatesGroup):
     confirming = State()
     uploading = State()
 
-class Download(StatesGroup):
-    waiting_object = State()
-
 class Info(StatesGroup):
     waiting_object = State()
 
@@ -86,7 +83,6 @@ UPLOAD_STEPS = [
     "Фото входных дверей снаружи",
     "Дополнительные фотографии"
 ]
-
 MANDATORY_STEPS = {
     "Общее фото помещения",
     "Фото корректора",
@@ -99,7 +95,9 @@ SESSION_COUNTER = {}
 # ========== КЛАВИАТУРЫ ==========
 def main_kb():
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="/photo"), KeyboardButton(text="/addphoto"), KeyboardButton(text="/info")]],
+        keyboard=[[KeyboardButton(text="/photo"),
+                   KeyboardButton(text="/addphoto"),
+                   KeyboardButton(text="/info")]],
         resize_keyboard=True
     )
 
@@ -119,6 +117,12 @@ def step_kb(step_name, has_files=False):
             ]]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+def add_wait_kb():
+    # для addphoto до загрузки файлов — только Отмена
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")
+    ]])
+
 def confirm_kb(prefix: str):
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Да", callback_data=f"{prefix}_confirm_yes"),
@@ -129,7 +133,7 @@ def confirm_kb(prefix: str):
 def is_from_work_topic(msg: Message) -> bool:
     return (msg.chat and msg.chat.id == WORK_CHAT_ID and getattr(msg, "is_topic_message", False))
 
-async def safe_call(coro, pause=0.25):
+async def safe_call(coro, pause=0.2):
     try:
         res = await coro
         await asyncio.sleep(pause)
@@ -165,13 +169,25 @@ def get_object_info(object_id):
     except:
         return None
 
+async def edit_or_send_choice(m: Message, text: str, kb: InlineKeyboardMarkup, state: FSMContext):
+    data = await state.get_data()
+    last_id = data.get("last_msg")
+    if last_id:
+        try:
+            await bot.edit_message_text(chat_id=m.chat.id, message_id=last_id, text=text, reply_markup=kb)
+            return
+        except:
+            pass
+    msg = await m.answer(text, reply_markup=kb)
+    await state.update_data(last_msg=msg.message_id)
+
 # ========== КОМАНДЫ ==========
 @router.message(Command("start"))
 async def cmd_start(m: Message):
     await m.answer(
         "👋 Привет! Это бот для загрузки фото по объектам котельных.\n\n"
         "📸 /photo — пошаговая загрузка\n"
-        "➕ /addphoto — добавление файлов\n"
+        "➕ /addphoto — добавить файлы к объекту\n"
         "ℹ️ /info — информация об объекте",
         reply_markup=main_kb()
     )
@@ -226,23 +242,48 @@ async def photo_confirm_yes(c: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "photo_confirm_no")
 async def photo_confirm_no(c: CallbackQuery, state: FSMContext):
     await state.clear()
-    await c.message.edit_text("❌ Операция отменена.")
+    try:
+        await c.message.edit_text("❌ Операция отменена.")
+    except:
+        await c.message.answer("❌ Операция отменена.")
     await c.answer("Отмена")
 
-# ====== ADDPHOTO ======
+# ====== ADDPHOTO с подтверждением ======
 @router.message(AddPhoto.waiting_object)
 async def check_add_object(m: Message, state: FSMContext):
     obj = m.text.strip()
     ok, name = check_object_excel(obj)
     if ok:
         await state.update_data(object=obj, object_name=name, files=[])
-        await state.set_state(AddPhoto.uploading)
-        await m.answer("📸 Отправьте файлы для добавления.", reply_markup=step_kb('', False))
+        await state.set_state(AddPhoto.confirming)
+        await m.answer(f"Подтвердите объект (добавление файлов):\n\n🆔 {obj}\n🏷️ {name}",
+                       reply_markup=confirm_kb("add"))
     else:
         await m.answer(f"❌ Объект {obj} не найден.")
         await state.clear()
 
-# ========== ОБРАБОТКА ФАЙЛОВ ==========
+@router.callback_query(F.data == "add_confirm_yes")
+async def add_confirm_yes(c: CallbackQuery, state: FSMContext):
+    await state.set_state(AddPhoto.uploading)
+    try:
+        await c.message.edit_text("📸 Отправьте файлы для добавления.", reply_markup=add_wait_kb())
+        await state.update_data(last_msg=c.message.message_id)
+    except:
+        msg = await c.message.answer("📸 Отправьте файлы для добавления.", reply_markup=add_wait_kb())
+        await state.update_data(last_msg=msg.message_id)
+    await c.answer("Подтверждено")
+
+@router.callback_query(F.data == "add_confirm_no")
+async def add_confirm_no(c: CallbackQuery, state: FSMContext):
+    await state.clear()
+    try:
+        await c.message.edit_text("❌ Операция отменена.")
+    except:
+        await c.message.answer("❌ Операция отменена.")
+    await c.answer("Отмена")
+
+# ========== ПРИЁМ ФАЙЛОВ ==========
+# --- PHOTO: на шаге, с поддержкой медиагрупп и единичного сообщения ---
 @router.message(Upload.uploading, F.photo | F.video | F.document)
 async def handle_upload(m: Message, state: FSMContext):
     data = await state.get_data()
@@ -259,24 +300,74 @@ async def handle_upload(m: Message, state: FSMContext):
     elif m.document:
         file_info = {"type": "document", "file_id": m.document.file_id}
 
-    cur["files"].append(file_info)
+    if m.media_group_id:
+        media_groups = data.get("media_groups", {})
+        group_id = m.media_group_id
+        media_groups.setdefault(group_id, []).append(file_info)
+        await state.update_data(media_groups=media_groups)
 
-    msg = await m.answer("Выберите", reply_markup=step_kb(cur["name"], has_files=True))
-    await state.update_data(steps=steps, last_msg=msg.message_id)
+        await asyncio.sleep(1.1)  # дождаться всех частей альбома
 
+        data = await state.get_data()
+        media_groups = data.get("media_groups", {})
+        if group_id in media_groups:
+            cur["files"].extend(media_groups.pop(group_id))
+            await state.update_data(steps=steps, media_groups=media_groups)
+
+            # показать ОДНО сообщение "Выберите"
+            await edit_or_send_choice(m, "Выберите", step_kb(cur["name"], has_files=True), state)
+    else:
+        # одиночный файл
+        cur["files"].append(file_info)
+        await state.update_data(steps=steps)
+        await edit_or_send_choice(m, "Выберите", step_kb(cur["name"], has_files=True), state)
+
+# --- ADDPHOTO: один блок, без шагов. Тоже с медиагруппами ---
 @router.message(AddPhoto.uploading, F.photo | F.video | F.document)
 async def handle_addphoto(m: Message, state: FSMContext):
     data = await state.get_data()
     files = data.get("files", [])
-    if m.photo:
-        files.append({"type": "photo", "file_id": m.photo[-1].file_id})
-    elif m.video:
-        files.append({"type": "video", "file_id": m.video.file_id})
-    elif m.document:
-        files.append({"type": "document", "file_id": m.document.file_id})
 
-    msg = await m.answer("Выберите", reply_markup=step_kb('', has_files=True))
-    await state.update_data(files=files, last_msg=msg.message_id)
+    file_info = {}
+    if m.photo:
+        file_info = {"type": "photo", "file_id": m.photo[-1].file_id}
+    elif m.video:
+        file_info = {"type": "video", "file_id": m.video.file_id}
+    elif m.document:
+        file_info = {"type": "document", "file_id": m.document.file_id}
+
+    if m.media_group_id:
+        groups = data.get("add_media_groups", {})
+        gid = m.media_group_id
+        groups.setdefault(gid, []).append(file_info)
+        await state.update_data(add_media_groups=groups)
+
+        await asyncio.sleep(1.1)
+
+        data = await state.get_data()
+        groups = data.get("add_media_groups", {})
+        if gid in groups:
+            files.extend(groups.pop(gid))
+            await state.update_data(files=files, add_media_groups=groups)
+
+            # показать ОДНО сообщение "Выберите" c Save/Cancel
+            await edit_or_send_choice(m, "Выберите",
+                                      InlineKeyboardMarkup(inline_keyboard=[[
+                                          InlineKeyboardButton(text="💾 Сохранить", callback_data="save"),
+                                          InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")
+                                      ]]),
+                                      state)
+    else:
+        files.append(file_info)
+        await state.update_data(files=files)
+
+        # показать/обновить "Выберите" c Save/Cancel
+        await edit_or_send_choice(m, "Выберите",
+                                  InlineKeyboardMarkup(inline_keyboard=[[
+                                      InlineKeyboardButton(text="💾 Сохранить", callback_data="save"),
+                                      InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")
+                                  ]]),
+                                  state)
 
 # ========== СОХРАНЕНИЕ ==========
 @router.callback_query(F.data == "save")
@@ -286,19 +377,24 @@ async def step_save(c: CallbackQuery, state: FSMContext):
     obj_name = data.get("object_name") or ""
     author = c.from_user.full_name or c.from_user.username or str(c.from_user.id)
 
-    # --- если это AddPhoto ---
-    if data.get("files") is not None and "steps" not in data:
-        files = data["files"]
+    # --- ADDPHOTO путь (нет steps, есть files) ---
+    if "steps" not in data and data.get("files") is not None:
+        files = data.get("files", [])
         if files:
+            # пишем в БД
             for f in files:
                 save_files(obj, "Дополнительно", [f], author)
-            await post_archive_full_object(obj, obj_name, files, author)
+            # отправляем в архив одним блоком
+            await post_archive_full_object(obj, obj_name, files)
         await state.clear()
-        await c.message.edit_text(f"✅ Файлы добавлены для объекта {obj}.", reply_markup=None)
+        try:
+            await c.message.edit_text(f"✅ Файлы добавлены для объекта {obj}.", reply_markup=None)
+        except:
+            await c.message.answer(f"✅ Файлы добавлены для объекта {obj}.")
         await c.answer("Сохранено ✅")
         return
 
-    # --- обычный Upload (photo) ---
+    # --- PHOTO путь (шаги) ---
     step_i = data["step"]
     steps = data["steps"]
     cur = steps[step_i]
@@ -306,33 +402,75 @@ async def step_save(c: CallbackQuery, state: FSMContext):
     if cur["files"]:
         save_files(obj, cur["name"], cur["files"], author)
         SESSION_COUNTER[obj] = SESSION_COUNTER.get(obj, 0) + len(cur["files"])
-        archive_files = data.get("archive_files", [])
-        archive_files.extend(cur["files"])
-        await state.update_data(archive_files=archive_files)
+        # накапливаем все файлы для общей архивной отправки
+        arch = data.get("archive_files", [])
+        arch.extend(cur["files"])
+        await state.update_data(archive_files=arch)
 
+    # следующий шаг
     step_i += 1
     await state.update_data(step=step_i, steps=steps)
+
     if step_i < len(steps):
         next_name = steps[step_i]["name"]
-        await c.message.edit_text(f"📸 Отправьте {next_name}", reply_markup=step_kb(next_name))
-        await state.update_data(last_msg=c.message.message_id)
+        try:
+            await c.message.edit_text(f"📸 Отправьте {next_name}", reply_markup=step_kb(next_name))
+            await state.update_data(last_msg=c.message.message_id)
+        except:
+            msg = await c.message.answer(f"📸 Отправьте {next_name}", reply_markup=step_kb(next_name))
+            await state.update_data(last_msg=msg.message_id)
     else:
-        archive_files = data.get("archive_files", [])
-        if archive_files:
-            await post_archive_full_object(obj, obj_name, archive_files, author)
-        await c.message.edit_text(f"✅ Загрузка завершена для объекта {obj}.", reply_markup=None)
+        # конец — отправляем ЕДИНЫМ блоком (шапка + медиагруппы по 10)
+        arch = data.get("archive_files", [])
+        if arch:
+            await post_archive_full_object(obj, obj_name, arch)
+        try:
+            await c.message.edit_text(f"✅ Загрузка завершена для объекта {obj}.", reply_markup=None)
+        except:
+            await c.message.answer(f"✅ Загрузка завершена для объекта {obj}.")
         await state.clear()
+
     await c.answer("Сохранено ✅")
+
+@router.callback_query(F.data == "skip")
+async def step_skip(c: CallbackQuery, state: FSMContext):
+    # только для /photo
+    data = await state.get_data()
+    if "steps" not in data:
+        await c.answer()  # игнор в addphoto
+        return
+    step_i = data["step"] + 1
+    steps = data["steps"]
+    await state.update_data(step=step_i)
+    if step_i < len(steps):
+        next_name = steps[step_i]["name"]
+        try:
+            await c.message.edit_text(f"📸 Отправьте {next_name}", reply_markup=step_kb(next_name))
+            await state.update_data(last_msg=c.message.message_id)
+        except:
+            msg = await c.message.answer(f"📸 Отправьте {next_name}", reply_markup=step_kb(next_name))
+            await state.update_data(last_msg=msg.message_id)
+        await c.answer("Пропущено")
+    else:
+        try:
+            await c.message.edit_text("✅ Загрузка завершена.", reply_markup=None)
+        except:
+            await c.message.answer("✅ Загрузка завершена.")
+        await state.clear()
+        await c.answer("Готово")
 
 @router.callback_query(F.data == "cancel")
 async def cancel_action(c: CallbackQuery, state: FSMContext):
     await state.clear()
-    await c.message.edit_text("❌ Операция отменена.", reply_markup=None)
+    try:
+        await c.message.edit_text("❌ Операция отменена.", reply_markup=None)
+    except:
+        await c.message.answer("❌ Операция отменена.")
     await c.answer("Отменено")
 
 # ========== АРХИВ ==========
-async def post_archive_full_object(object_id: str, object_name: str, all_files: list, author: str):
-    """Одна шапка + медиагруппы по 10 файлов"""
+async def post_archive_full_object(object_id: str, object_name: str, all_files: list):
+    """Одна шапка + медиагруппы по 10 (фото/видео). Документы отправляются отдельно."""
     try:
         header = (
             f"💾 ОБЪЕКТ #{object_id}\n"
@@ -342,7 +480,7 @@ async def post_archive_full_object(object_id: str, object_name: str, all_files: 
         )
         await safe_call(bot.send_message(ARCHIVE_CHAT_ID, header))
 
-        # формируем группы по 10
+        # фото/видео партиями по 10
         batch = []
         for f in all_files:
             if f["type"] == "photo":
@@ -353,9 +491,13 @@ async def post_archive_full_object(object_id: str, object_name: str, all_files: 
             if len(batch) == 10:
                 await safe_call(bot.send_media_group(ARCHIVE_CHAT_ID, batch))
                 batch = []
-
         if batch:
             await safe_call(bot.send_media_group(ARCHIVE_CHAT_ID, batch))
+
+        # документы — отдельно (их нельзя в media_group)
+        # если нужны — раскомментируй:
+        # for d in [x for x in all_files if x["type"] == "document"]:
+        #     await safe_call(bot.send_document(ARCHIVE_CHAT_ID, d["file_id"]))
 
     except Exception as e:
         print(f"[archive_full_object] {e}")
