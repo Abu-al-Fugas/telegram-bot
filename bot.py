@@ -23,7 +23,7 @@ from aiohttp import web
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 WORK_CHAT_ID = int(os.environ.get("WORK_CHAT_ID", "0"))
 ARCHIVE_CHAT_ID = int(os.environ.get("ARCHIVE_CHAT_ID", "0"))
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
+WEBHOOK_URL = "https://telegram-bot-b6pn.onrender.com"
 PORT = int(os.environ.get("PORT", 10000))
 DB_PATH = "files.db"
 
@@ -61,12 +61,10 @@ def get_files(object_id):
 # ========== СОСТОЯНИЯ ==========
 class Upload(StatesGroup):
     waiting_object = State()
-    confirm_object = State()
     uploading = State()
 
 class AddPhoto(StatesGroup):
     waiting_object = State()
-    confirm_object = State()
     uploading = State()
 
 class Download(StatesGroup):
@@ -87,27 +85,36 @@ UPLOAD_STEPS = [
     "Дополнительные фотографии"
 ]
 
+MANDATORY_STEPS = {
+    "Общее фото помещения",
+    "Фото корректора",
+    "Фото места устанавливаемой СТМ",
+    "Фото места прокладки кабелей"
+}
+
 # ========== КЛАВИАТУРЫ ==========
 def main_kb():
+    """Reply клавиатура"""
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="/start"), KeyboardButton(text="/photo")],
-            [KeyboardButton(text="/addphoto"), KeyboardButton(text="/download")]
-        ],
+        keyboard=[[KeyboardButton(text="/photo"), KeyboardButton(text="/addphoto")]],
         resize_keyboard=True
     )
 
-def step_kb(has_files=False):
+def step_kb(step_name, has_files=False):
+    """Inline клавиатура шагов"""
     if has_files:
         buttons = [[
             InlineKeyboardButton(text="💾 Сохранить", callback_data="save"),
             InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")
         ]]
     else:
-        buttons = [[
-            InlineKeyboardButton(text="➡️ Пропустить", callback_data="skip"),
-            InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")
-        ]]
+        if step_name in MANDATORY_STEPS:
+            buttons = [[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]]
+        else:
+            buttons = [[
+                InlineKeyboardButton(text="➡️ Пропустить", callback_data="skip"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")
+            ]]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # ========== ХЕЛПЕРЫ ==========
@@ -137,7 +144,12 @@ def check_object_excel(object_id):
 # ========== КОМАНДЫ ==========
 @router.message(Command("start"))
 async def cmd_start(m: Message):
-    await m.answer("🤖 Бот для фотофиксации по объектам.\nИспользуйте /photo или /addphoto внутри вашей темы.", reply_markup=main_kb())
+    await m.answer(
+        "👋 Привет! Это бот для загрузки фото по объектам котельных.\n\n"
+        "📸 Используй /photo для новой загрузки или /addphoto для добавления файлов.\n"
+        "⚙️ Работает только в рабочей группе/теме.",
+        reply_markup=main_kb()
+    )
 
 @router.message(Command("photo"))
 async def cmd_photo(m: Message, state: FSMContext):
@@ -158,7 +170,7 @@ async def cmd_addphoto(m: Message, state: FSMContext):
 @router.message(Command("download"))
 async def cmd_download(m: Message, state: FSMContext):
     await state.set_state(Download.waiting_object)
-    await m.answer("📝 Введите номер объекта:", reply_markup=main_kb())
+    await m.answer("📝 Введите номер объекта:")
 
 # ========== ПРОВЕРКА ОБЪЕКТА ==========
 @router.message(Upload.waiting_object)
@@ -166,7 +178,7 @@ async def check_upload_object(m: Message, state: FSMContext):
     obj = m.text.strip()
     ok, name = check_object_excel(obj)
     if ok:
-        await state.update_data(object=obj, name=name, step=0, steps=[{"name": s, "files": []} for s in UPLOAD_STEPS])
+        await state.update_data(object=obj, step=0, steps=[{"name": s, "files": []} for s in UPLOAD_STEPS])
         await state.set_state(Upload.uploading)
         await send_step(m, state)
     else:
@@ -178,9 +190,9 @@ async def check_add_object(m: Message, state: FSMContext):
     obj = m.text.strip()
     ok, name = check_object_excel(obj)
     if ok:
-        await state.update_data(object=obj, name=name, files=[])
+        await state.update_data(object=obj, files=[])
         await state.set_state(AddPhoto.uploading)
-        await m.answer(f"📸 Отправьте дополнительные файлы для объекта {obj}.", reply_markup=step_kb(has_files=True))
+        await m.answer(f"📸 Отправьте дополнительные файлы для объекта {obj}.", reply_markup=step_kb('', True))
     else:
         await m.answer(f"❌ Объект {obj} не найден.")
         await state.clear()
@@ -193,6 +205,7 @@ async def handle_upload(m: Message, state: FSMContext):
     steps = data["steps"]
     cur = steps[step_i]
 
+    # определяем тип файла
     if m.photo:
         cur["files"].append({"type": "photo", "file_id": m.photo[-1].file_id})
     elif m.video:
@@ -200,11 +213,16 @@ async def handle_upload(m: Message, state: FSMContext):
     elif m.document:
         cur["files"].append({"type": "document", "file_id": m.document.file_id})
 
-    if len(cur["files"]) == 1:
-        msg = await m.answer(reply_markup=step_kb(has_files=True))
-        await state.update_data(last_msg=msg.message_id)
+    # удаляем старое служебное сообщение
+    if data.get("last_msg"):
+        try:
+            await bot.delete_message(m.chat.id, data["last_msg"])
+        except:
+            pass
 
-    await state.update_data(steps=steps)
+    # показываем новые кнопки
+    msg = await m.answer(reply_markup=step_kb(cur["name"], has_files=True))
+    await state.update_data(steps=steps, last_msg=msg.message_id)
 
 @router.message(AddPhoto.uploading, F.photo | F.video | F.document)
 async def handle_add(m: Message, state: FSMContext):
@@ -274,7 +292,7 @@ async def send_step(m: Message, state: FSMContext):
     if step_i >= len(steps):
         return
     step = steps[step_i]
-    msg = await m.answer(f"📸 Отправьте {step['name']}", reply_markup=step_kb())
+    msg = await m.answer(f"📸 Отправьте {step['name']}", reply_markup=step_kb(step["name"]))
     await state.update_data(last_msg=msg.message_id)
 
 async def post_archive(object_id, steps, author):
@@ -333,10 +351,10 @@ async def on_startup():
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(webhook_url)
     await bot.set_my_commands([
-        BotCommand(command="start", description="Перезапуск"),
+        BotCommand(command="start", description="Перезапуск бота"),
         BotCommand(command="photo", description="Загрузить фото по объекту"),
         BotCommand(command="addphoto", description="Добавить фото"),
-        BotCommand(command="download", description="Скачать файлы объекта"),
+        BotCommand(command="download", description="Скачать файлы объекта")
     ])
     print("✅ Webhook установлен:", webhook_url)
 
