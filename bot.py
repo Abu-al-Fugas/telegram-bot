@@ -74,43 +74,41 @@ class AddPhoto(StatesGroup):
     confirming = State()
     uploading = State()
 
-class Download(StatesGroup):
-    waiting_object = State()
-
 class Info(StatesGroup):
     waiting_object = State()
 
 # ========== КОНСТАНТЫ ==========
 UPLOAD_STEPS = [
-    "Общий вид газопровода до и после счётчика",
-    "Существующий счётчик — общий и крупный план",
-    "Маркировка существующего счётчика (номер, год, показания)",
-    "Пломбы и маркировка существующего счётчика",
-    "Стрелка направления газа на старом счётчике",
-    "Газопровод после монтажа нового счётчика",
-    "Новый счётчик — общий и крупный план",
-    "Маркировка нового счётчика (номер, год, показания)",
-    "Стрелка направления газа на новом счётчике",
-    "Шильдик котла (модель и мощность)",
-    "Дополнительные фото"
+    "📸 Общий вид газопровода до и после счётчика",
+
+    "🧾 Старый счётчик — общий и крупный план (заводской номер, год, показания)",
+    "🔒 Фото пломбы на фоне маркировки счётчика",
+    "➡️ Стрелка направления газа на старом счётчике",
+
+    "🧱 Газопровод после монтажа нового счётчика",
+
+    "🆕 Новый счётчик — общий и крупный план (заводской номер, год, показания)",
+    "➡️ Стрелка направления нового счётчика",
+
+    "🎥 Видео герметичности соединений",
+    "🔥 Шильдик котла (модель и мощность)",
+    "📎 Дополнительные фото"
 ]
 
 MANDATORY_STEPS = {
-    "Общий вид газопровода до и после счётчика",
-    "Существующий счётчик — общий и крупный план",
-    "Маркировка существующего счётчика (номер, год, показания)",
-    "Пломбы и маркировка существующего счётчика",
-    "Стрелка направления газа на старом счётчике",
-    "Газопровод после монтажа нового счётчика",
-    "Новый счётчик — общий и крупный план",
-    "Маркировка нового счётчика (номер, год, показания)",
-    "Стрелка направления газа на новом счётчике",
-    "Шильдик котла (модель и мощность)"
+    "📸 Общий вид газопровода до и после счётчика",
+    "🧾 Старый счётчик — общий и крупный план (заводской номер, год, показания)",
+    "🔒 Фото пломбы на фоне маркировки счётчика",
+    "➡️ Стрелка направления газа на старом счётчике",
+    "🧱 Газопровод после монтажа нового счётчика",
+    "🆕 Новый счётчик — общий и крупный план (заводской номер, год, показания)",
+    "➡️ Стрелка направления нового счётчика",
+    "🎥 Видео герметичности соединений",
+    "🔥 Шильдик котла (модель и мощность)"
 }
 
 # ========== КЛАВИАТУРЫ ==========
 def main_kb():
-    # Порядок и набор команд: addphoto, info, photo
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="/addphoto"), KeyboardButton(text="/info"), KeyboardButton(text="/photo")]],
         resize_keyboard=True
@@ -183,9 +181,10 @@ def get_object_info(object_id):
 async def cmd_start(m: Message):
     await m.answer(
         "👋 Привет! Это бот для загрузки фото по объектам счётчиков газа.\n\n"
-        "📸 Используй /photo для новой загрузки или /addphoto для добавления файлов.\n"
-        "ℹ️ Используй /info для просмотра информации по объектам.\n"
-        "⚙️ Работает только в рабочей группе/теме.",
+        "📸 /photo — новая загрузка\n"
+        "📎 /addphoto — добавить фото\n"
+        "ℹ️ /info — информация по объектам\n"
+        "⚙️ Работает только в рабочей теме.",
         reply_markup=main_kb()
     )
 
@@ -205,11 +204,6 @@ async def cmd_addphoto(m: Message, state: FSMContext):
     await state.set_state(AddPhoto.waiting_object)
     await m.answer("📝 Введите номер объекта (для добавления файлов):")
 
-@router.message(Command("download"))
-async def cmd_download(m: Message, state: FSMContext):
-    await state.set_state(Download.waiting_object)
-    await m.answer("📝 Введите номер объекта:")
-
 @router.message(Command("info"))
 async def cmd_info(m: Message, state: FSMContext):
     await state.set_state(Info.waiting_object)
@@ -217,15 +211,12 @@ async def cmd_info(m: Message, state: FSMContext):
 
 @router.message(Command("result"))
 async def cmd_result(m: Message):
-    # Статистика из БД (переживает рестарт)
     with closing(sqlite3.connect(DB_PATH)) as conn:
         cur = conn.execute("SELECT object_id, COUNT(*) FROM files GROUP BY object_id ORDER BY object_id")
         rows = cur.fetchall()
-
     if not rows:
         await m.answer("📋 Нет завершённых загрузок в базе данных.", reply_markup=main_kb())
         return
-
     lines = ["✅ Завершённые загрузки (всего):"]
     for oid, cnt in rows:
         lines.append(f"• Объект {oid}: {cnt} файлов")
@@ -262,43 +253,28 @@ async def photo_confirm_yes(c: CallbackQuery, state: FSMContext):
     await state.set_state(Upload.uploading)
     data = await state.get_data()
     step0 = data["steps"][0]["name"]
-    try:
-        await c.message.edit_text(f"📸 Отправьте: {step0}", reply_markup=step_kb(step0))
-        await state.update_data(last_msg=c.message.message_id)
-    except:
-        msg = await c.message.answer(f"📸 Отправьте: {step0}", reply_markup=step_kb(step0))
-        await state.update_data(last_msg=msg.message_id)
+    msg = await c.message.answer(f"📸 Отправьте: {step0}", reply_markup=step_kb(step0))
+    await state.update_data(last_msg=msg.message_id)
     await c.answer("Подтверждено")
 
 @router.callback_query(F.data == "photo_confirm_no")
 async def photo_confirm_no(c: CallbackQuery, state: FSMContext):
     await state.clear()
-    try:
-        await c.message.edit_text("❌ Операция отменена.")
-    except:
-        await c.message.answer("❌ Операция отменена.")
+    await c.message.answer("❌ Операция отменена.")
     await c.answer("Отмена")
 
 # ===== Подтверждение: /addphoto =====
 @router.callback_query(F.data == "add_confirm_yes")
 async def add_confirm_yes(c: CallbackQuery, state: FSMContext):
     await state.set_state(AddPhoto.uploading)
-    try:
-        # Кнопки "Сохранить/Отмена" пригодятся, чтобы зафиксировать добавленные файлы
-        await c.message.edit_text("📸 Отправьте дополнительные файлы для объекта. Нажмите «Сохранить», когда закончите.", reply_markup=step_kb('', True))
-        await state.update_data(last_msg=c.message.message_id)
-    except:
-        msg = await c.message.answer("📸 Отправьте дополнительные файлы для объекта. Нажмите «Сохранить», когда закончите.", reply_markup=step_kb('', True))
-        await state.update_data(last_msg=msg.message_id)
+    msg = await c.message.answer("📸 Отправьте дополнительные файлы для объекта. Нажмите «Сохранить», когда закончите.", reply_markup=step_kb('', True))
+    await state.update_data(last_msg=msg.message_id)
     await c.answer("Подтверждено")
 
 @router.callback_query(F.data == "add_confirm_no")
 async def add_confirm_no(c: CallbackQuery, state: FSMContext):
     await state.clear()
-    try:
-        await c.message.edit_text("❌ Операция отменена.")
-    except:
-        await c.message.answer("❌ Операция отменена.")
+    await c.message.answer("❌ Операция отменена.")
     await c.answer("Отмена")
 
 # ========== ПРИЁМ ФАЙЛОВ ==========
@@ -308,8 +284,6 @@ async def handle_upload(m: Message, state: FSMContext):
     step_i = data["step"]
     steps = data["steps"]
     cur = steps[step_i]
-
-    # определить тип файла
     file_info = {}
     if m.photo:
         file_info = {"type": "photo", "file_id": m.photo[-1].file_id}
@@ -317,40 +291,9 @@ async def handle_upload(m: Message, state: FSMContext):
         file_info = {"type": "video", "file_id": m.video.file_id}
     elif m.document:
         file_info = {"type": "document", "file_id": m.document.file_id}
-
-    if m.media_group_id:
-        media_groups = data.get("media_groups", {})
-        group_id = m.media_group_id
-        media_groups.setdefault(group_id, []).append(file_info)
-        await state.update_data(media_groups=media_groups)
-
-        # ждём прихода всего альбома
-        await asyncio.sleep(1.2)
-
-        data = await state.get_data()
-        media_groups = data.get("media_groups", {})
-        if group_id in media_groups:
-            cur["files"].extend(media_groups.pop(group_id))
-
-            # удалить предыдущее сообщение с кнопками (если было)
-            if data.get("last_msg"):
-                try:
-                    await bot.delete_message(m.chat.id, data["last_msg"])
-                except:
-                    pass
-
-            msg = await m.answer("Выберите действие", reply_markup=step_kb(cur["name"], has_files=True))
-            await state.update_data(steps=steps, last_msg=msg.message_id, media_groups=media_groups)
-    else:
-        # одиночный файл
-        cur["files"].append(file_info)
-        if data.get("last_msg"):
-            try:
-                await bot.delete_message(m.chat.id, data["last_msg"])
-            except:
-                pass
-        msg = await m.answer("Выберите действие", reply_markup=step_kb(cur["name"], has_files=True))
-        await state.update_data(steps=steps, last_msg=msg.message_id)
+    cur["files"].append(file_info)
+    msg = await m.answer("Выберите действие", reply_markup=step_kb(cur["name"], has_files=True))
+    await state.update_data(steps=steps, last_msg=msg.message_id)
 
 @router.message(AddPhoto.uploading, F.photo | F.video | F.document)
 async def handle_add(m: Message, state: FSMContext):
@@ -367,144 +310,85 @@ async def handle_add(m: Message, state: FSMContext):
 # ========== CALLBACKS ==========
 @router.callback_query(F.data == "save")
 async def step_save(c: CallbackQuery, state: FSMContext):
-    """
-    ВАЖНОЕ ИЗМЕНЕНИЕ:
-    - для /photo: только сохраняем файлы текущего шага в БД; НИЧЕГО не отправляем в архив здесь.
-      После последнего шага — собираем все файлы объекта из БД, единожды отправляем в архив и ОЧИЩАЕМ БД по объекту.
-    - для /addphoto: сохраняем добавленные файлы в БД и сразу отправляем в архив одним пакетом, затем удаляем из БД.
-    """
     current_state = await state.get_state()
     data = await state.get_data()
     author = c.from_user.full_name or c.from_user.username or str(c.from_user.id)
 
-    # ====== Режим AddPhoto ======
+    # ====== AddPhoto ======
     if current_state == AddPhoto.uploading.state:
         obj = data["object"]
         obj_name = data.get("object_name") or ""
         files = data.get("files", [])
-
         if files:
-            # пишем в БД
-            save_files(obj, "Дополнительные фото", files, author)
-
-            # вытянуть все файлы объекта из БД, отправить одним пакетом, очистить БД
+            save_files(obj, "📎 Дополнительные фото", files, author)
             all_steps = get_files(obj)
-            all_files_flat = []
-            for _step, ff in all_steps.items():
-                all_files_flat.extend(ff)
-
+            all_files_flat = [f for ff in all_steps.values() for f in ff]
             if all_files_flat:
                 await post_archive_single_group(obj, obj_name, all_files_flat, author)
                 delete_files_by_object(obj)
-
         await state.clear()
-        try:
-            await c.message.edit_text(f"✅ Файлы по объекту {obj} отправлены в архив.", reply_markup=None)
-        except:
-            await c.message.answer(f"✅ Файлы по объекту {obj} отправлены в архив.")
+        await c.message.edit_text(f"✅ Файлы по объекту {obj} отправлены в архив.")
         await c.answer("Сохранено ✅")
         return
 
-    # ====== Режим Upload (пошагово) ======
+    # ====== Upload ======
     obj = data["object"]
     obj_name = data.get("object_name") or ""
     step_i = data["step"]
     steps = data["steps"]
     cur = steps[step_i]
-
     if cur["files"]:
-        # сохраняем в БД (НЕ отправляем в архив на шаге!)
         save_files(obj, cur["name"], cur["files"], author)
-
-    # следующий шаг
     step_i += 1
     await state.update_data(step=step_i, steps=steps)
 
     if step_i < len(steps):
         next_name = steps[step_i]["name"]
-        try:
-            await c.message.edit_text(f"📸 Отправьте: {next_name}", reply_markup=step_kb(next_name))
-            await state.update_data(last_msg=c.message.message_id)
-        except:
-            msg = await c.message.answer(f"📸 Отправьте: {next_name}", reply_markup=step_kb(next_name))
-            await state.update_data(last_msg=msg.message_id)
+        msg = await c.message.answer(f"📸 Отправьте: {next_name}", reply_markup=step_kb(next_name))
+        await state.update_data(last_msg=msg.message_id)
         await c.answer("Сохранено ✅")
     else:
-        # Все шаги пройдены — соберём ВСЕ файлы объекта, отправим в архив одной группой и удалим из БД
         all_steps = get_files(obj)
-        all_files_flat = []
-        for _step, ff in all_steps.items():
-            all_files_flat.extend(ff)
-
+        all_files_flat = [f for ff in all_steps.values() for f in ff]
         if all_files_flat:
             await post_archive_single_group(obj, obj_name, all_files_flat, author)
             delete_files_by_object(obj)
-
-        try:
-            await c.message.edit_text(f"✅ Загрузка завершена для объекта {obj}. Файлы отправлены в архив.", reply_markup=None)
-        except:
-            await c.message.answer(f"✅ Загрузка завершена для объекта {obj}. Файлы отправлены в архив.")
+        await c.message.edit_text(f"✅ Загрузка завершена для объекта {obj}. Файлы отправлены в архив.")
         await state.clear()
         await c.answer("Готово ✅")
 
 @router.callback_query(F.data == "skip")
 async def step_skip(c: CallbackQuery, state: FSMContext):
     data = await state.get_data()
+    obj = data["object"]
+    obj_name = data.get("object_name") or ""
+    author = c.from_user.full_name or c.from_user.username or str(c.from_user.id)
     step_i = data["step"] + 1
     steps = data["steps"]
     await state.update_data(step=step_i)
 
-    if step_i < len(steps):
-        next_name = steps[step_i]["name"]
-        try:
-            await c.message.edit_text(f"📸 Отправьте: {next_name}", reply_markup=step_kb(next_name))
-            await state.update_data(last_msg=c.message.message_id)
-        except:
-            msg = await c.message.answer(f"📸 Отправьте: {next_name}", reply_markup=step_kb(next_name))
-            await state.update_data(last_msg=msg.message_id)
-        await c.answer("Пропущено")
-    else:
-        try:
-            await c.message.edit_text("✅ Загрузка завершена.", reply_markup=None)
-        except:
-            await c.message.answer("✅ Загрузка завершена.")
+    # если это был последний шаг — отправляем в архив
+    if step_i >= len(steps):
+        all_steps = get_files(obj)
+        all_files_flat = [f for ff in all_steps.values() for f in ff]
+        if all_files_flat:
+            await post_archive_single_group(obj, obj_name, all_files_flat, author)
+            delete_files_by_object(obj)
+        await c.message.edit_text(f"✅ Загрузка завершена для объекта {obj}. Файлы отправлены в архив.")
         await state.clear()
-        await c.answer("Готово")
+        await c.answer("Готово ✅")
+        return
+
+    next_name = steps[step_i]["name"]
+    msg = await c.message.answer(f"📸 Отправьте: {next_name}", reply_markup=step_kb(next_name))
+    await state.update_data(last_msg=msg.message_id)
+    await c.answer("Пропущено")
 
 @router.callback_query(F.data == "cancel")
 async def step_cancel(c: CallbackQuery, state: FSMContext):
     await state.clear()
-    try:
-        await c.message.edit_text("❌ Загрузка отменена.", reply_markup=None)
-    except:
-        await c.message.answer("❌ Загрузка отменена.")
+    await c.message.edit_text("❌ Загрузка отменена.")
     await c.answer("Отменено")
-
-# ========== DOWNLOAD ==========
-@router.message(Download.waiting_object)
-async def download_files(m: Message, state: FSMContext):
-    obj = m.text.strip()
-    data = get_files(obj)
-    if not data:
-        await m.answer(f"❌ Файлы по объекту {obj} в БД не найдены.")
-        await state.clear()
-        return
-    await m.answer(f"📂 Найдено блоков: {len(data)}. Отправляю...")
-    for step, files in data.items():
-        await safe_call(bot.send_message(m.chat.id, f"📁 {step}"))
-        media_batch = []
-        for f in files:
-            if f["type"] == "photo":
-                media_batch.append(InputMediaPhoto(media=f["file_id"]))
-            elif f["type"] == "video":
-                media_batch.append(InputMediaVideo(media=f["file_id"]))
-        if media_batch:
-            await safe_call(bot.send_media_group(m.chat.id, media_batch))
-        docs = [f for f in files if f["type"] == "document"]
-        for d in docs:
-            await safe_call(bot.send_document(m.chat.id, d["file_id"]))
-    await m.answer(f"✅ Файлы по объекту {obj} отправлены.")
-    await state.clear()
 
 # ========== INFO ==========
 @router.message(Info.waiting_object)
@@ -528,8 +412,9 @@ async def info_object(m: Message, state: FSMContext):
 # ========== ВСПОМОГАТЕЛЬНЫЕ ==========
 async def post_archive_single_group(object_id: str, object_name: str, files: list, author: str):
     """
-    Отправка в Архив: одна шапка на группу + несколькими медиагруппами (без заголовков шагов).
-    Telegram принимает до 10 элементов в одной media_group. Документы шлём отдельно.
+    Отправка всех файлов в архивную группу медиагруппами.
+    Telegram допускает до 10 элементов в одной media_group.
+    Документы отправляются отдельно.
     """
     try:
         title = object_name or ""
@@ -548,7 +433,6 @@ async def post_archive_single_group(object_id: str, object_name: str, files: lis
             elif f["type"] == "video":
                 batch.append(InputMediaVideo(media=f["file_id"]))
             elif f["type"] == "document":
-                # документы не смешиваем с media_group — отправим отдельно
                 pass
 
             if len(batch) == 10:
@@ -558,12 +442,12 @@ async def post_archive_single_group(object_id: str, object_name: str, files: lis
         if batch:
             await safe_call(bot.send_media_group(ARCHIVE_CHAT_ID, batch))
 
-        # документы — отдельными сообщениями
+        # документы отправляем отдельно
         for d in [x for x in files if x["type"] == "document"]:
             await safe_call(bot.send_document(ARCHIVE_CHAT_ID, d["file_id"]))
 
     except Exception as e:
-        print(f"[archive_single_group] {e}")
+        print(f"[archive_single_group] Ошибка при отправке в архив: {e}")
 
 # ========== WEBHOOK ==========
 async def on_startup():
@@ -575,7 +459,6 @@ async def on_startup():
         BotCommand(command="addphoto", description="Добавить фото"),
         BotCommand(command="info", description="Информация об объекте"),
         BotCommand(command="photo", description="Загрузить фото по объекту"),
-        BotCommand(command="download", description="Скачать файлы объекта"),
         BotCommand(command="result", description="Завершённые загрузки"),
         BotCommand(command="start", description="Перезапуск бота"),
     ])
