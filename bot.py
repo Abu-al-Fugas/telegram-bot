@@ -318,29 +318,44 @@ async def step_save(c: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     author = c.from_user.full_name or c.from_user.username or str(c.from_user.id)
 
+    # ====== AddPhoto ======
     if current_state == AddPhoto.uploading.state:
-        obj = data["object"]
+        obj = data.get("object")
         obj_name = data.get("object_name") or ""
-        files = data.get("files", [])
-        if files:
-            save_files(obj, "📎 Дополнительные фото", files, author)
-            all_steps = get_files(obj)
-            all_files_flat = [f for ff in all_steps.values() for f in ff]
-            if all_files_flat:
-                await post_archive_single_group(obj, obj_name, all_files_flat, author)
-                delete_files_by_object(obj)
+        files = data.get("files") or []
+
+        if not files:
+            await c.answer("❗ Не найдено файлов для сохранения. Отправьте хотя бы один файл.", show_alert=True)
+            return
+
+        # сохраняем файлы в базу
+        save_files(obj, "📎 Дополнительные фото", files, author)
+
+        # получаем все файлы по объекту
+        all_steps = get_files(obj)
+        all_files_flat = [f for ff in all_steps.values() for f in ff]
+
+        # если в базе есть файлы — отправляем их в архив
+        if all_files_flat:
+            await post_archive_single_group(obj, obj_name, all_files_flat, author)
+            delete_files_by_object(obj)
+
+        # очищаем состояние
         await state.clear()
-        await c.message.edit_text(f"✅ Файлы по объекту {obj} отправлены в архив.")
+        await c.message.edit_text(f"✅ Дополнительные файлы по объекту {obj} отправлены в архив.")
         await c.answer("Сохранено ✅")
         return
 
+    # ====== Upload (основная пошаговая логика) ======
     obj = data["object"]
     obj_name = data.get("object_name") or ""
     step_i = data["step"]
     steps = data["steps"]
     cur = steps[step_i]
+
     if cur["files"]:
         save_files(obj, cur["name"], cur["files"], author)
+
     step_i += 1
     await state.update_data(step=step_i, steps=steps)
 
@@ -468,3 +483,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
