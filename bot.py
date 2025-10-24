@@ -284,16 +284,62 @@ async def handle_upload(m: Message, state: FSMContext):
     step_i = data["step"]
     steps = data["steps"]
     cur = steps[step_i]
-    file_info = {}
+
+    # определить тип файла
     if m.photo:
         file_info = {"type": "photo", "file_id": m.photo[-1].file_id}
     elif m.video:
         file_info = {"type": "video", "file_id": m.video.file_id}
     elif m.document:
         file_info = {"type": "document", "file_id": m.document.file_id}
-    cur["files"].append(file_info)
-    msg = await m.answer("Выберите действие", reply_markup=step_kb(cur["name"], has_files=True))
-    await state.update_data(steps=steps, last_msg=msg.message_id)
+    else:
+        return
+
+    # ===== если это часть медиагруппы (альбом) =====
+    if m.media_group_id:
+        media_groups = data.get("media_groups", {})
+        group_id = m.media_group_id
+
+        # складываем файлы альбома во временный буфер
+        media_groups.setdefault(group_id, []).append(file_info)
+        await state.update_data(media_groups=media_groups)
+
+        # даём Telegram прислать весь альбом
+        await asyncio.sleep(1.2)
+
+        # проверяем буфер ещё раз — если группа ещё там, значит альбом собран
+        data = await state.get_data()
+        media_groups = data.get("media_groups", {})
+        if group_id in media_groups:
+            cur["files"].extend(media_groups.pop(group_id))
+
+            # удаляем предыдущее сообщение с кнопками (если было)
+            last_msg_id = data.get("last_msg")
+            if last_msg_id:
+                try:
+                    await m.bot.delete_message(chat_id=m.chat.id, message_id=last_msg_id)
+                except:
+                    pass
+
+            # одно сообщение на весь альбом
+            msg = await m.answer("Выберите действие", reply_markup=step_kb(cur["name"], has_files=True))
+            await state.update_data(steps=steps, last_msg=msg.message_id, media_groups=media_groups)
+
+    else:
+        # ===== одиночный файл =====
+        cur["files"].append(file_info)
+
+        # удаляем предыдущее сообщение с кнопками (если было)
+        last_msg_id = data.get("last_msg")
+        if last_msg_id:
+            try:
+                await m.bot.delete_message(chat_id=m.chat.id, message_id=last_msg_id)
+            except:
+                pass
+
+        # одно сообщение на одиночный файл
+        msg = await m.answer("Выберите действие", reply_markup=step_kb(cur["name"], has_files=True))
+        await state.update_data(steps=steps, last_msg=msg.message_id)
 
 @router.message(AddPhoto.uploading, F.photo | F.video | F.document)
 async def handle_add(m: Message, state: FSMContext):
@@ -484,3 +530,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
