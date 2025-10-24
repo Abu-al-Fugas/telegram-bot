@@ -253,29 +253,17 @@ async def photo_confirm_yes(c: CallbackQuery, state: FSMContext):
     await state.set_state(Upload.uploading)
     data = await state.get_data()
     step0 = data["steps"][0]["name"]
-    msg = await c.message.answer(f"📸 Отправьте: {step0}", reply_markup=step_kb(step0))
-    await state.update_data(last_msg=msg.message_id)
+    await c.message.edit_text(step0, reply_markup=step_kb(step0))
+    await state.update_data(last_msg=c.message.message_id)
     await c.answer("Подтверждено")
 
-@router.callback_query(F.data == "photo_confirm_no")
-async def photo_confirm_no(c: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await c.message.answer("❌ Операция отменена.")
-    await c.answer("Отмена")
-
-# ===== Подтверждение: /addphoto =====
+# ====== ADDPHOTO ======
 @router.callback_query(F.data == "add_confirm_yes")
 async def add_confirm_yes(c: CallbackQuery, state: FSMContext):
     await state.set_state(AddPhoto.uploading)
     msg = await c.message.answer("📸 Отправьте дополнительные файлы для объекта. Нажмите «Сохранить», когда закончите.", reply_markup=step_kb('', True))
     await state.update_data(last_msg=msg.message_id)
     await c.answer("Подтверждено")
-
-@router.callback_query(F.data == "add_confirm_no")
-async def add_confirm_no(c: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await c.message.answer("❌ Операция отменена.")
-    await c.answer("Отмена")
 
 # ========== ПРИЁМ ФАЙЛОВ ==========
 @router.message(Upload.uploading, F.photo | F.video | F.document)
@@ -285,7 +273,6 @@ async def handle_upload(m: Message, state: FSMContext):
     steps = data["steps"]
     cur = steps[step_i]
 
-    # определить тип файла
     if m.photo:
         file_info = {"type": "photo", "file_id": m.photo[-1].file_id}
     elif m.video:
@@ -295,63 +282,34 @@ async def handle_upload(m: Message, state: FSMContext):
     else:
         return
 
-    # ===== если это часть медиагруппы (альбом) =====
     if m.media_group_id:
         media_groups = data.get("media_groups", {})
         group_id = m.media_group_id
-
-        # складываем файлы альбома во временный буфер
         media_groups.setdefault(group_id, []).append(file_info)
         await state.update_data(media_groups=media_groups)
-
-        # даём Telegram прислать весь альбом
         await asyncio.sleep(1.2)
-
-        # проверяем буфер ещё раз — если группа ещё там, значит альбом собран
         data = await state.get_data()
         media_groups = data.get("media_groups", {})
         if group_id in media_groups:
             cur["files"].extend(media_groups.pop(group_id))
-
-            # удаляем предыдущее сообщение с кнопками (если было)
             last_msg_id = data.get("last_msg")
             if last_msg_id:
                 try:
                     await m.bot.delete_message(chat_id=m.chat.id, message_id=last_msg_id)
                 except:
                     pass
-
-            # одно сообщение на весь альбом
             msg = await m.answer("Выберите действие", reply_markup=step_kb(cur["name"], has_files=True))
             await state.update_data(steps=steps, last_msg=msg.message_id, media_groups=media_groups)
-
     else:
-        # ===== одиночный файл =====
         cur["files"].append(file_info)
-
-        # удаляем предыдущее сообщение с кнопками (если было)
         last_msg_id = data.get("last_msg")
         if last_msg_id:
             try:
                 await m.bot.delete_message(chat_id=m.chat.id, message_id=last_msg_id)
             except:
                 pass
-
-        # одно сообщение на одиночный файл
         msg = await m.answer("Выберите действие", reply_markup=step_kb(cur["name"], has_files=True))
         await state.update_data(steps=steps, last_msg=msg.message_id)
-
-@router.message(AddPhoto.uploading, F.photo | F.video | F.document)
-async def handle_add(m: Message, state: FSMContext):
-    data = await state.get_data()
-    files = data.get("files", [])
-    if m.photo:
-        files.append({"type": "photo", "file_id": m.photo[-1].file_id})
-    elif m.video:
-        files.append({"type": "video", "file_id": m.video.file_id})
-    elif m.document:
-        files.append({"type": "document", "file_id": m.document.file_id})
-    await state.update_data(files=files)
 
 # ========== CALLBACKS ==========
 @router.callback_query(F.data == "save")
@@ -360,7 +318,6 @@ async def step_save(c: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     author = c.from_user.full_name or c.from_user.username or str(c.from_user.id)
 
-    # ====== AddPhoto ======
     if current_state == AddPhoto.uploading.state:
         obj = data["object"]
         obj_name = data.get("object_name") or ""
@@ -377,7 +334,6 @@ async def step_save(c: CallbackQuery, state: FSMContext):
         await c.answer("Сохранено ✅")
         return
 
-    # ====== Upload ======
     obj = data["object"]
     obj_name = data.get("object_name") or ""
     step_i = data["step"]
@@ -390,8 +346,8 @@ async def step_save(c: CallbackQuery, state: FSMContext):
 
     if step_i < len(steps):
         next_name = steps[step_i]["name"]
-        msg = await c.message.answer(f"📸 Отправьте: {next_name}", reply_markup=step_kb(next_name))
-        await state.update_data(last_msg=msg.message_id)
+        await c.message.edit_text(next_name, reply_markup=step_kb(next_name))
+        await state.update_data(last_msg=c.message.message_id)
         await c.answer("Сохранено ✅")
     else:
         all_steps = get_files(obj)
@@ -413,7 +369,6 @@ async def step_skip(c: CallbackQuery, state: FSMContext):
     steps = data["steps"]
     await state.update_data(step=step_i)
 
-    # если это был последний шаг — отправляем в архив
     if step_i >= len(steps):
         all_steps = get_files(obj)
         all_files_flat = [f for ff in all_steps.values() for f in ff]
@@ -426,15 +381,9 @@ async def step_skip(c: CallbackQuery, state: FSMContext):
         return
 
     next_name = steps[step_i]["name"]
-    msg = await c.message.answer(f"📸 Отправьте: {next_name}", reply_markup=step_kb(next_name))
-    await state.update_data(last_msg=msg.message_id)
+    await c.message.edit_text(next_name, reply_markup=step_kb(next_name))
+    await state.update_data(last_msg=c.message.message_id)
     await c.answer("Пропущено")
-
-@router.callback_query(F.data == "cancel")
-async def step_cancel(c: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await c.message.edit_text("❌ Загрузка отменена.")
-    await c.answer("Отменено")
 
 # ========== INFO ==========
 @router.message(Info.waiting_object)
@@ -455,13 +404,8 @@ async def info_object(m: Message, state: FSMContext):
     await m.answer("\n\n".join(responses))
     await state.clear()
 
-# ========== ВСПОМОГАТЕЛЬНЫЕ ==========
+# ========== ОТПРАВКА В АРХИВ ==========
 async def post_archive_single_group(object_id: str, object_name: str, files: list, author: str):
-    """
-    Отправка всех файлов в архивную группу медиагруппами.
-    Telegram допускает до 10 элементов в одной media_group.
-    Документы отправляются отдельно.
-    """
     try:
         title = object_name or ""
         header = (
@@ -471,7 +415,6 @@ async def post_archive_single_group(object_id: str, object_name: str, files: lis
             f"🕒 {datetime.now().strftime('%d.%m.%Y %H:%M')}"
         )
         await safe_call(bot.send_message(ARCHIVE_CHAT_ID, header))
-
         batch = []
         for f in files:
             if f["type"] == "photo":
@@ -480,18 +423,13 @@ async def post_archive_single_group(object_id: str, object_name: str, files: lis
                 batch.append(InputMediaVideo(media=f["file_id"]))
             elif f["type"] == "document":
                 pass
-
             if len(batch) == 10:
                 await safe_call(bot.send_media_group(ARCHIVE_CHAT_ID, batch))
                 batch = []
-
         if batch:
             await safe_call(bot.send_media_group(ARCHIVE_CHAT_ID, batch))
-
-        # документы отправляем отдельно
         for d in [x for x in files if x["type"] == "document"]:
             await safe_call(bot.send_document(ARCHIVE_CHAT_ID, d["file_id"]))
-
     except Exception as e:
         print(f"[archive_single_group] Ошибка при отправке в архив: {e}")
 
@@ -530,4 +468,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
