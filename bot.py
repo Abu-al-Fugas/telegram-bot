@@ -40,12 +40,6 @@ def init_db():
             object_id TEXT, step TEXT, kind TEXT, file_id TEXT,
             author TEXT, created_at TEXT
         )""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS completed(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            object_id TEXT UNIQUE,
-            author TEXT,
-            finished_at TEXT
-        )""")
         conn.commit()
 
 def save_files(object_id, step, files, author):
@@ -68,17 +62,6 @@ def delete_files_by_object(object_id):
     with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute("DELETE FROM files WHERE object_id=?", (object_id,))
         conn.commit()
-
-def add_completed_object(object_id, author):
-    with closing(sqlite3.connect(DB_PATH)) as conn:
-        conn.execute("INSERT OR REPLACE INTO completed(object_id, author, finished_at) VALUES (?,?,?)",
-                     (object_id, author, datetime.now().strftime("%d.%m.%Y %H:%M")))
-        conn.commit()
-
-def get_completed_objects():
-    with closing(sqlite3.connect(DB_PATH)) as conn:
-        cur = conn.execute("SELECT object_id, author, finished_at FROM completed ORDER BY finished_at DESC")
-        return cur.fetchall()
 
 # ========== СОСТОЯНИЯ ==========
 class Upload(StatesGroup):
@@ -205,26 +188,41 @@ async def cmd_start(m: Message):
         reply_markup=main_kb()
     )
 
-@router.message(Command("result"))
-async def cmd_result(m: Message):
-    rows = get_completed_objects()
-    if not rows:
-        await m.answer("📋 Нет завершённых загрузок.", reply_markup=main_kb())
-        return
-    lines = ["✅ Завершённые загрузки:"]
-    for oid, author, ts in rows:
-        lines.append(f"• Объект {oid} ({author}) — {ts}")
-    await m.answer("\n".join(lines), reply_markup=main_kb())
-
-# ========== /PHOTO ЗАГРУЗКА ==========
 @router.message(Command("photo"))
 async def cmd_photo(m: Message, state: FSMContext):
     if not is_from_work_topic(m):
-        await m.answer("📍 Эта команда работает только в рабочей теме.")
+        await m.answer("📍 Эта команда работает только в рабочей группе/теме.")
         return
     await state.set_state(Upload.waiting_object)
     await m.answer("📝 Введите номер объекта:")
 
+@router.message(Command("addphoto"))
+async def cmd_addphoto(m: Message, state: FSMContext):
+    if not is_from_work_topic(m):
+        await m.answer("📍 Эта команда работает только в рабочей группе/теме.")
+        return
+    await state.set_state(AddPhoto.waiting_object)
+    await m.answer("📝 Введите номер объекта (для добавления файлов):")
+
+@router.message(Command("info"))
+async def cmd_info(m: Message, state: FSMContext):
+    await state.set_state(Info.waiting_object)
+    await m.answer("📝 Введите один или несколько номеров объектов (через запятую):")
+
+@router.message(Command("result"))
+async def cmd_result(m: Message):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        cur = conn.execute("SELECT object_id, COUNT(*) FROM files GROUP BY object_id ORDER BY object_id")
+        rows = cur.fetchall()
+    if not rows:
+        await m.answer("📋 Нет завершённых загрузок в базе данных.", reply_markup=main_kb())
+        return
+    lines = ["✅ Завершённые загрузки (всего):"]
+    for oid, cnt in rows:
+        lines.append(f"• Объект {oid}: {cnt} файлов")
+    await m.answer("\n".join(lines), reply_markup=main_kb())
+
+# ========== ПРОВЕРКА ОБЪЕКТА + ПОДТВЕРЖДЕНИЕ ==========
 @router.message(Upload.waiting_object)
 async def check_upload_object(m: Message, state: FSMContext):
     obj = m.text.strip()
@@ -237,6 +235,19 @@ async def check_upload_object(m: Message, state: FSMContext):
         await m.answer(f"❌ Объект {obj} не найден.")
         await state.clear()
 
+@router.message(AddPhoto.waiting_object)
+async def check_add_object(m: Message, state: FSMContext):
+    obj = m.text.strip()
+    ok, name = check_object_excel(obj)
+    if ok:
+        await state.update_data(object=obj, object_name=name, files=[])
+        await state.set_state(AddPhoto.confirming)
+        await m.answer(f"Подтвердите объект (добавление файлов):\n\n🆔 {obj}\n🏷️ {name}", reply_markup=confirm_kb("add"))
+    else:
+        await m.answer(f"❌ Объект {obj} не найден.")
+        await state.clear()
+
+# ===== Подтверждение: /photo =====
 @router.callback_query(F.data == "photo_confirm_yes")
 async def photo_confirm_yes(c: CallbackQuery, state: FSMContext):
     await state.set_state(Upload.uploading)
@@ -246,6 +257,14 @@ async def photo_confirm_yes(c: CallbackQuery, state: FSMContext):
     await state.update_data(last_msg=c.message.message_id)
     await c.answer("Подтверждено")
 
+# ====== ADDPHOTO ======
+@router.callback_query(F.data == "add_confirm_yes")
+async def add_confirm_yes(c: CallbackQuery, state: FSMContext):
+    await state.set_state(AddPhoto.uploading)
+    msg = await c.message.answer("📸 Отправьте дополнительные файлы для объекта. Нажмите «Сохранить», когда закончите.", reply_markup=step_kb('', True))
+    await state.update_data(last_msg=msg.message_id)
+    await c.answer("Подтверждено")
+
 # ========== ПРИЁМ ФАЙЛОВ ==========
 @router.message(Upload.uploading, F.photo | F.video | F.document)
 async def handle_upload(m: Message, state: FSMContext):
@@ -253,6 +272,7 @@ async def handle_upload(m: Message, state: FSMContext):
     step_i = data["step"]
     steps = data["steps"]
     cur = steps[step_i]
+
     if m.photo:
         file_info = {"type": "photo", "file_id": m.photo[-1].file_id}
     elif m.video:
@@ -261,59 +281,66 @@ async def handle_upload(m: Message, state: FSMContext):
         file_info = {"type": "document", "file_id": m.document.file_id}
     else:
         return
+
     if m.media_group_id:
-        mg = data.get("media_groups", {})
-        gid = m.media_group_id
-        mg.setdefault(gid, []).append(file_info)
-        await state.update_data(media_groups=mg)
+        media_groups = data.get("media_groups", {})
+        group_id = m.media_group_id
+        media_groups.setdefault(group_id, []).append(file_info)
+        await state.update_data(media_groups=media_groups)
         await asyncio.sleep(1.2)
         data = await state.get_data()
-        mg = data.get("media_groups", {})
-        if gid in mg:
-            cur["files"].extend(mg.pop(gid))
+        media_groups = data.get("media_groups", {})
+        if group_id in media_groups:
+            cur["files"].extend(media_groups.pop(group_id))
+            last_msg_id = data.get("last_msg")
+            if last_msg_id:
+                try:
+                    await m.bot.delete_message(chat_id=m.chat.id, message_id=last_msg_id)
+                except:
+                    pass
             msg = await m.answer("Выберите действие", reply_markup=step_kb(cur["name"], has_files=True))
-            await state.update_data(steps=steps, last_msg=msg.message_id, media_groups=mg)
+            await state.update_data(steps=steps, last_msg=msg.message_id, media_groups=media_groups)
     else:
         cur["files"].append(file_info)
+        last_msg_id = data.get("last_msg")
+        if last_msg_id:
+            try:
+                await m.bot.delete_message(chat_id=m.chat.id, message_id=last_msg_id)
+            except:
+                pass
         msg = await m.answer("Выберите действие", reply_markup=step_kb(cur["name"], has_files=True))
         await state.update_data(steps=steps, last_msg=msg.message_id)
 
-# ========== CALLBACK SAVE ==========
+# ========== CALLBACKS ==========
 @router.callback_query(F.data == "save")
 async def step_save(c: CallbackQuery, state: FSMContext):
     current_state = await state.get_state()
     data = await state.get_data()
     author = c.from_user.full_name or c.from_user.username or str(c.from_user.id)
 
-    # === ADDPHOTO ===
     if current_state == AddPhoto.uploading.state:
-        obj = data.get("object")
+        obj = data["object"]
         obj_name = data.get("object_name") or ""
-        files = data.get("files") or []
-        if not files:
-            await c.answer("❗ Не найдено файлов для сохранения.", show_alert=True)
-            return
-        save_files(obj, "📎 Дополнительные фото", files, author)
-        all_steps = get_files(obj)
-        all_files_flat = [f for ff in all_steps.values() for f in ff]
-        if all_files_flat:
-            await post_archive_single_group(obj, obj_name, all_files_flat, author)
-            delete_files_by_object(obj)
+        files = data.get("files", [])
+        if files:
+            save_files(obj, "📎 Дополнительные фото", files, author)
+            all_steps = get_files(obj)
+            all_files_flat = [f for ff in all_steps.values() for f in ff]
+            if all_files_flat:
+                await post_archive_single_group(obj, obj_name, all_files_flat, author)
+                delete_files_by_object(obj)
         await state.clear()
-        await c.message.edit_text(f"✅ Дополнительные файлы по объекту {obj} отправлены в архив.")
+        await c.message.edit_text(f"✅ Файлы по объекту {obj} отправлены в архив.")
         await c.answer("Сохранено ✅")
         return
 
-    # === PHOTO ===
     obj = data["object"]
     obj_name = data.get("object_name") or ""
     step_i = data["step"]
     steps = data["steps"]
     cur = steps[step_i]
-
     if cur["files"]:
         save_files(obj, cur["name"], cur["files"], author)
-
     step_i += 1
     await state.update_data(step=step_i, steps=steps)
 
@@ -328,10 +355,54 @@ async def step_save(c: CallbackQuery, state: FSMContext):
         if all_files_flat:
             await post_archive_single_group(obj, obj_name, all_files_flat, author)
             delete_files_by_object(obj)
-            add_completed_object(obj, author)
         await c.message.edit_text(f"✅ Загрузка завершена для объекта {obj}. Файлы отправлены в архив.")
         await state.clear()
         await c.answer("Готово ✅")
+
+@router.callback_query(F.data == "skip")
+async def step_skip(c: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    obj = data["object"]
+    obj_name = data.get("object_name") or ""
+    author = c.from_user.full_name or c.from_user.username or str(c.from_user.id)
+    step_i = data["step"] + 1
+    steps = data["steps"]
+    await state.update_data(step=step_i)
+
+    if step_i >= len(steps):
+        all_steps = get_files(obj)
+        all_files_flat = [f for ff in all_steps.values() for f in ff]
+        if all_files_flat:
+            await post_archive_single_group(obj, obj_name, all_files_flat, author)
+            delete_files_by_object(obj)
+        await c.message.edit_text(f"✅ Загрузка завершена для объекта {obj}. Файлы отправлены в архив.")
+        await state.clear()
+        await c.answer("Готово ✅")
+        return
+
+    next_name = steps[step_i]["name"]
+    await c.message.edit_text(next_name, reply_markup=step_kb(next_name))
+    await state.update_data(last_msg=c.message.message_id)
+    await c.answer("Пропущено")
+
+# ========== INFO ==========
+@router.message(Info.waiting_object)
+async def info_object(m: Message, state: FSMContext):
+    objs = [x.strip() for x in m.text.split(",") if x.strip()]
+    responses = []
+    for obj in objs:
+        info = get_object_info(obj)
+        if not info:
+            responses.append(f"❌ Объект {obj} не найден в файле objects.xlsx")
+        else:
+            responses.append(
+                f"📋 Объект {info['id']}:\n"
+                f"🏢 Потребитель: {info['consumer']}\n"
+                f"📍 Объект: {info['object']}\n"
+                f"🗺 Адрес: {info['address']}\n"
+            )
+    await m.answer("\n\n".join(responses))
+    await state.clear()
 
 # ========== ОТПРАВКА В АРХИВ ==========
 async def post_archive_single_group(object_id: str, object_name: str, files: list, author: str):
@@ -350,6 +421,8 @@ async def post_archive_single_group(object_id: str, object_name: str, files: lis
                 batch.append(InputMediaPhoto(media=f["file_id"]))
             elif f["type"] == "video":
                 batch.append(InputMediaVideo(media=f["file_id"]))
+            elif f["type"] == "document":
+                pass
             if len(batch) == 10:
                 await safe_call(bot.send_media_group(ARCHIVE_CHAT_ID, batch))
                 batch = []
