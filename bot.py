@@ -109,7 +109,7 @@ UPLOAD_STEPS = [
     "🔥 Шильдик котла (модель и мощность)",
     "📎 Дополнительные фото"
 ]
-MANDATORY_STEPS = set(UPLOAD_STEPS[:-1])
+MANDATORY_STEPS = set(UPLOAD_STEPS[:-1])  # все кроме "Дополнительные фото"
 
 # ========== КЛАВИАТУРЫ ==========
 def main_kb():
@@ -119,7 +119,7 @@ def main_kb():
     )
 
 def step_kb(step_name, has_files=False):
-    # Для первого экрана /addphoto (без файлов) показываем только Отмена
+    # Особый случай: первый экран /addphoto — только Отмена
     if step_name == "" and not has_files:
         buttons = [[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]]
         return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -147,7 +147,6 @@ def confirm_kb(prefix: str):
 
 # ========== ХЕЛПЕРЫ ==========
 def is_from_work_topic(msg: Message) -> bool:
-    # Работает только в рабочем топике
     return (msg.chat and msg.chat.id == WORK_CHAT_ID and getattr(msg, "is_topic_message", False))
 
 async def safe_call(coro, pause=0.25):
@@ -294,7 +293,6 @@ async def add_confirm_yes(c: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     obj = data["object"]
     await state.set_state(AddPhoto.uploading)
-    # редактируем предыдущее сообщение; на старте только "Отмена"
     await c.message.edit_text(f"📸 Отправьте дополнительные файлы для объекта №{obj}.", reply_markup=step_kb('', False))
     await state.update_data(last_msg=c.message.message_id)
     try:
@@ -309,7 +307,6 @@ async def cancel_anywhere(c: CallbackQuery, state: FSMContext):
     try:
         await c.message.edit_text("❌ Действие отменено.", reply_markup=None)
     except:
-        # если сообщение уже было удалено/изменено
         pass
     try:
         await c.answer("Отменено")
@@ -329,26 +326,29 @@ async def cancel_confirm(c: CallbackQuery, state: FSMContext):
         pass
 
 # ========== ПРИЁМ ФАЙЛОВ ==========
-# Помощник: обработка альбомов — финализируем ТОЛЬКО один раз
+# --- помощник: финализация media_group для /photo с анти-дубликатом ---
 async def _finalize_media_group_for_photo(m: Message, state: FSMContext, group_id: str):
-    # ждём, чтобы Telegram прислал все элементы альбома
-    await asyncio.sleep(1.2)
+    await asyncio.sleep(1.2)  # дождаться всех сообщений альбома
     data = await state.get_data()
     step_i = data["step"]
     steps = data["steps"]
     cur = steps[step_i]
-    media_groups = data.get("media_groups", {})
 
-    group = media_groups.get(group_id)
-    if not group:
-        # уже обработано параллельным хендлером
+    media_groups = data.get("media_groups", {})
+    finalizing = set(data.get("finalizing_groups", []))
+
+    # двойная проверка: если сейчас эта группа ещё помечена как финализируемая — мы её финализируем
+    if group_id not in finalizing:
         return
 
-    # переносим все файлы альбома в текущий шаг и очищаем буфер группы
-    cur["files"].extend(group)
-    media_groups.pop(group_id, None)
+    group = media_groups.pop(group_id, [])
+    # снимаем флаг финализации
+    finalizing.discard(group_id)
 
-    # обновляем сообщение-кнопки (одно)
+    if group:
+        cur["files"].extend(group)
+
+    # заменить/создать одно сообщение с кнопками
     last_msg_id = data.get("last_msg")
     if last_msg_id:
         try:
@@ -356,7 +356,12 @@ async def _finalize_media_group_for_photo(m: Message, state: FSMContext, group_i
         except:
             pass
     msg = await m.answer("Выберите действие", reply_markup=step_kb(cur["name"], has_files=True))
-    await state.update_data(steps=steps, last_msg=msg.message_id, media_groups=media_groups)
+    await state.update_data(
+        steps=steps,
+        last_msg=msg.message_id,
+        media_groups=media_groups,
+        finalizing_groups=list(finalizing)
+    )
 
 @router.message(Upload.uploading, F.photo | F.video | F.document)
 async def handle_upload(m: Message, state: FSMContext):
@@ -376,14 +381,21 @@ async def handle_upload(m: Message, state: FSMContext):
 
     if m.media_group_id:
         media_groups = data.get("media_groups", {})
+        finalizing = set(data.get("finalizing_groups", []))
         gid = m.media_group_id
-        media_groups.setdefault(gid, []).append(file_info)
-        await state.update_data(media_groups=media_groups)
 
-        # финализацию альбома делаем только из одного хендлера (тот, что первый успеет)
-        # решаем так: каждый хендлер запускает finalize, но попадает внутрь только один —
-        # кто «успеет» увидеть группу в media_groups. Остальные увидят пусто и выйдут.
-        asyncio.create_task(_finalize_media_group_for_photo(m, state, gid))
+        media_groups.setdefault(gid, []).append(file_info)
+
+        # если финализация ещё не запущена, помечаем и запускаем
+        start_finalize = False
+        if gid not in finalizing:
+            finalizing.add(gid)
+            start_finalize = True
+
+        await state.update_data(media_groups=media_groups, finalizing_groups=list(finalizing))
+
+        if start_finalize:
+            asyncio.create_task(_finalize_media_group_for_photo(m, state, gid))
         return
     else:
         cur["files"].append(file_info)
@@ -396,17 +408,22 @@ async def handle_upload(m: Message, state: FSMContext):
         msg = await m.answer("Выберите действие", reply_markup=step_kb(cur["name"], has_files=True))
         await state.update_data(steps=steps, last_msg=msg.message_id)
 
-# --- /addphoto: аналогичная обработка альбомов ---
+# --- помощник: финализация media_group для /addphoto с анти-дубликатом ---
 async def _finalize_media_group_for_add(m: Message, state: FSMContext, group_id: str):
     await asyncio.sleep(1.2)
     data = await state.get_data()
     files = data.get("files", [])
     media_groups = data.get("media_groups", {})
-    group = media_groups.get(group_id)
-    if not group:
+    finalizing = set(data.get("finalizing_groups", []))
+
+    if group_id not in finalizing:
         return
-    files.extend(group)
-    media_groups.pop(group_id, None)
+
+    group = media_groups.pop(group_id, [])
+    finalizing.discard(group_id)
+
+    if group:
+        files.extend(group)
 
     last_msg_id = data.get("last_msg")
     if last_msg_id:
@@ -415,7 +432,7 @@ async def _finalize_media_group_for_add(m: Message, state: FSMContext, group_id:
         except:
             pass
     msg = await m.answer("Выберите действие", reply_markup=step_kb('', has_files=True))
-    await state.update_data(files=files, last_msg=msg.message_id, media_groups=media_groups)
+    await state.update_data(files=files, last_msg=msg.message_id, media_groups=media_groups, finalizing_groups=list(finalizing))
 
 @router.message(AddPhoto.uploading, F.photo | F.video | F.document)
 async def handle_addphoto_upload(m: Message, state: FSMContext):
@@ -433,10 +450,20 @@ async def handle_addphoto_upload(m: Message, state: FSMContext):
 
     if m.media_group_id:
         media_groups = data.get("media_groups", {})
+        finalizing = set(data.get("finalizing_groups", []))
         gid = m.media_group_id
+
         media_groups.setdefault(gid, []).append(file_info)
-        await state.update_data(media_groups=media_groups)
-        asyncio.create_task(_finalize_media_group_for_add(m, state, gid))
+
+        start_finalize = False
+        if gid not in finalizing:
+            finalizing.add(gid)
+            start_finalize = True
+
+        await state.update_data(media_groups=media_groups, finalizing_groups=list(finalizing))
+
+        if start_finalize:
+            asyncio.create_task(_finalize_media_group_for_add(m, state, gid))
         return
     else:
         files.append(file_info)
@@ -449,7 +476,7 @@ async def handle_addphoto_upload(m: Message, state: FSMContext):
         msg = await m.answer("Выберите действие", reply_markup=step_kb('', has_files=True))
         await state.update_data(files=files, last_msg=msg.message_id)
 
-# ========== CALLBACKS: SAVE / SKIP ==========
+# ========== CALLBACKS ==========
 @router.callback_query(F.data == "save")
 async def step_save(c: CallbackQuery, state: FSMContext):
     current_state = await state.get_state()
@@ -620,7 +647,7 @@ async def on_startup():
     ])
     asyncio.create_task(keepalive())
     print("✅ Webhook установлен:", webhook_url)
-    print("💡 KEEPALIVE активен каждые 4 минуты. Также оставьте внешний пинг раз в 5 минут.")
+    print("💡 KEEPALIVE активен каждые 4 минуты. Оставьте внешний пинг 5 минут.")
 
 async def handle_webhook(request):
     data = await request.json()
