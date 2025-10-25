@@ -109,7 +109,7 @@ UPLOAD_STEPS = [
     "🔥 Шильдик котла (модель и мощность)",
     "📎 Дополнительные фото"
 ]
-MANDATORY_STEPS = set(UPLOAD_STEPS[:-1])
+MANDATORY_STEPS = set(UPLOAD_STEPS[:-1])  # все кроме "Дополнительные фото"
 
 # ========== КЛАВИАТУРЫ ==========
 def main_kb():
@@ -119,19 +119,25 @@ def main_kb():
     )
 
 def step_kb(step_name, has_files=False):
+    # Особый случай: первый экран /addphoto — только Отмена
     if step_name == "" and not has_files:
-        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]])
+        buttons = [[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]]
+        return InlineKeyboardMarkup(inline_keyboard=buttons)
+
     if has_files:
-        return InlineKeyboardMarkup(inline_keyboard=[[
+        buttons = [[
             InlineKeyboardButton(text="💾 Сохранить", callback_data="save"),
             InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")
-        ]])
-    if step_name in MANDATORY_STEPS:
-        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]])
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="➡️ Пропустить", callback_data="skip"),
-        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")
-    ]])
+        ]]
+    else:
+        if step_name in MANDATORY_STEPS:
+            buttons = [[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]]
+        else:
+            buttons = [[
+                InlineKeyboardButton(text="➡️ Пропустить", callback_data="skip"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")
+            ]]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def confirm_kb(prefix: str):
     return InlineKeyboardMarkup(inline_keyboard=[[
@@ -187,14 +193,142 @@ async def keepalive():
                 await s.get(WEBHOOK_URL)
         except:
             pass
-        await asyncio.sleep(240)  # каждые 4 мин
+        await asyncio.sleep(240)  # 4 минуты
 
-# ========== КОМАНДЫ / СОСТОЯНИЯ ==========
-# (все команды, подтверждения, отмены и сохранения — те же, как в предыдущей версии)
+# ========== КОМАНДЫ ==========
+@router.message(Command("start"))
+async def cmd_start(m: Message):
+    await m.answer(
+        "👋 Привет! Это бот для загрузки фото по объектам счётчиков газа.\n\n"
+        "📸 /photo — новая загрузка\n"
+        "📎 /addphoto — добавить фото\n"
+        "ℹ️ /info — информация по объектам\n"
+        "⚙️ Работает только в рабочей теме.",
+        reply_markup=main_kb()
+    )
 
-# --- ключевой участок: исправленная финализация альбомов ---
+@router.message(Command("photo"))
+async def cmd_photo(m: Message, state: FSMContext):
+    if not is_from_work_topic(m):
+        await m.answer("📍 Эта команда работает только в рабочей группе/теме.")
+        return
+    await state.set_state(Upload.waiting_object)
+    await m.answer("📝 Введите номер объекта:")
+
+@router.message(Command("addphoto"))
+async def cmd_addphoto(m: Message, state: FSMContext):
+    if not is_from_work_topic(m):
+        await m.answer("📍 Эта команда работает только в рабочей группе/теме.")
+        return
+    await state.set_state(AddPhoto.waiting_object)
+    await m.answer("📝 Введите номер объекта (для добавления файлов):")
+
+@router.message(Command("info"))
+async def cmd_info(m: Message, state: FSMContext):
+    await state.set_state(Info.waiting_object)
+    await m.answer("📝 Введите один или несколько номеров объектов (через запятую):")
+
+@router.message(Command("result"))
+async def cmd_result(m: Message):
+    rows = list_completed()
+    if not rows:
+        await m.answer("📋 Пока нет завершённых объектов (через /photo).", reply_markup=main_kb())
+        return
+    lines = ["✅ Обработанные объекты (сценарий /photo):"]
+    for oid, author, ts in rows:
+        try:
+            ts_h = datetime.fromisoformat(ts).strftime("%d.%m.%Y %H:%M")
+        except:
+            ts_h = ts
+        lines.append(f"• #{oid} — {author} ({ts_h})")
+    await m.answer("\n".join(lines), reply_markup=main_kb())
+
+# ========== ПРОВЕРКА ОБЪЕКТА + ПОДТВЕРЖДЕНИЕ ==========
+@router.message(Upload.waiting_object)
+async def check_upload_object(m: Message, state: FSMContext):
+    obj = m.text.strip()
+    ok, name = check_object_excel(obj)
+    if ok:
+        await state.update_data(object=obj, object_name=name, step=0, steps=[{"name": s, "files": []} for s in UPLOAD_STEPS])
+        await state.set_state(Upload.confirming)
+        await m.answer(f"Подтвердите объект:\n\n🆔 {obj}\n🏷️ {name}", reply_markup=confirm_kb("photo"))
+    elif ok is False:
+        await m.answer(f"❌ Объект {obj} не найден.")
+        await state.clear()
+    else:
+        await m.answer(f"❌ Ошибка чтения objects.xlsx: {name or 'неизвестно'}")
+        await state.clear()
+
+@router.message(AddPhoto.waiting_object)
+async def check_add_object(m: Message, state: FSMContext):
+    obj = m.text.strip()
+    ok, name = check_object_excel(obj)
+    if ok:
+        await state.update_data(object=obj, object_name=name, files=[])
+        await state.set_state(AddPhoto.confirming)
+        await m.answer(f"Подтвердите объект (добавление файлов):\n\n🆔 {obj}\n🏷️ {name}", reply_markup=confirm_kb("add"))
+    elif ok is False:
+        await m.answer(f"❌ Объект {obj} не найден.")
+        await state.clear()
+    else:
+        await m.answer(f"❌ Ошибка чтения objects.xlsx: {name or 'неизвестно'}")
+        await state.clear()
+
+# ===== Подтверждение: /photo =====
+@router.callback_query(F.data == "photo_confirm_yes")
+async def photo_confirm_yes(c: CallbackQuery, state: FSMContext):
+    await state.set_state(Upload.uploading)
+    data = await state.get_data()
+    step0 = data["steps"][0]["name"]
+    await c.message.edit_text(step0, reply_markup=step_kb(step0))
+    await state.update_data(last_msg=c.message.message_id)
+    try:
+        await c.answer("Подтверждено")
+    except:
+        pass
+
+# ===== Подтверждение: /addphoto =====
+@router.callback_query(F.data == "add_confirm_yes")
+async def add_confirm_yes(c: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    obj = data["object"]
+    await state.set_state(AddPhoto.uploading)
+    await c.message.edit_text(f"📸 Отправьте дополнительные файлы для объекта №{obj}.", reply_markup=step_kb('', False))
+    await state.update_data(last_msg=c.message.message_id)
+    try:
+        await c.answer("Подтверждено")
+    except:
+        pass
+
+# ====== ОТМЕНА ======
+@router.callback_query(F.data == "cancel")
+async def cancel_anywhere(c: CallbackQuery, state: FSMContext):
+    await state.clear()
+    try:
+        await c.message.edit_text("❌ Действие отменено.", reply_markup=None)
+    except:
+        pass
+    try:
+        await c.answer("Отменено")
+    except:
+        pass
+
+@router.callback_query(F.data.in_({"photo_confirm_no", "add_confirm_no"}))
+async def cancel_confirm(c: CallbackQuery, state: FSMContext):
+    await state.clear()
+    try:
+        await c.message.edit_text("❌ Действие отменено.", reply_markup=None)
+    except:
+        pass
+    try:
+        await c.answer("Отменено")
+    except:
+        pass
+
+# ========== ПРИЁМ ФАЙЛОВ ==========
+# --- помощник: финализация media_group для /photo с анти-дубликатом ---
 async def _finalize_media_group_for_photo(m: Message, state: FSMContext, group_id: str):
-    await asyncio.sleep(2.5)  # ждём дольше, чтобы собрать все фото
+    await asyncio.sleep(3.2)  # дождаться всех сообщений альбома
     data = await state.get_data()
     step_i = data["step"]
     steps = data["steps"]
@@ -203,19 +337,18 @@ async def _finalize_media_group_for_photo(m: Message, state: FSMContext, group_i
     media_groups = data.get("media_groups", {})
     finalizing = set(data.get("finalizing_groups", []))
 
+    # двойная проверка: если сейчас эта группа ещё помечена как финализируемая — мы её финализируем
     if group_id not in finalizing:
-        # группа уже финализирована, но могут прийти опоздавшие файлы
-        extra = media_groups.pop(group_id, [])
-        if extra:
-            cur["files"].extend(extra)
-            await state.update_data(steps=steps, media_groups=media_groups)
         return
 
     group = media_groups.pop(group_id, [])
+    # снимаем флаг финализации
     finalizing.discard(group_id)
+
     if group:
         cur["files"].extend(group)
 
+    # заменить/создать одно сообщение с кнопками
     last_msg_id = data.get("last_msg")
     if last_msg_id:
         try:
@@ -230,23 +363,65 @@ async def _finalize_media_group_for_photo(m: Message, state: FSMContext, group_i
         finalizing_groups=list(finalizing)
     )
 
-# --- аналогично для addphoto ---
+@router.message(Upload.uploading, F.photo | F.video | F.document)
+async def handle_upload(m: Message, state: FSMContext):
+    data = await state.get_data()
+    step_i = data["step"]
+    steps = data["steps"]
+    cur = steps[step_i]
+
+    if m.photo:
+        file_info = {"type": "photo", "file_id": m.photo[-1].file_id}
+    elif m.video:
+        file_info = {"type": "video", "file_id": m.video.file_id}
+    elif m.document:
+        file_info = {"type": "document", "file_id": m.document.file_id}
+    else:
+        return
+
+    if m.media_group_id:
+        media_groups = data.get("media_groups", {})
+        finalizing = set(data.get("finalizing_groups", []))
+        gid = m.media_group_id
+
+        media_groups.setdefault(gid, []).append(file_info)
+
+        # если финализация ещё не запущена, помечаем и запускаем
+        start_finalize = False
+        if gid not in finalizing:
+            finalizing.add(gid)
+            start_finalize = True
+
+        await state.update_data(media_groups=media_groups, finalizing_groups=list(finalizing))
+
+        if start_finalize:
+            asyncio.create_task(_finalize_media_group_for_photo(m, state, gid))
+        return
+    else:
+        cur["files"].append(file_info)
+        last_msg_id = data.get("last_msg")
+        if last_msg_id:
+            try:
+                await m.bot.delete_message(chat_id=m.chat.id, message_id=last_msg_id)
+            except:
+                pass
+        msg = await m.answer("Выберите действие", reply_markup=step_kb(cur["name"], has_files=True))
+        await state.update_data(steps=steps, last_msg=msg.message_id)
+
+# --- помощник: финализация media_group для /addphoto с анти-дубликатом ---
 async def _finalize_media_group_for_add(m: Message, state: FSMContext, group_id: str):
-    await asyncio.sleep(2.5)
+    await asyncio.sleep(3.2)
     data = await state.get_data()
     files = data.get("files", [])
     media_groups = data.get("media_groups", {})
     finalizing = set(data.get("finalizing_groups", []))
 
     if group_id not in finalizing:
-        extra = media_groups.pop(group_id, [])
-        if extra:
-            files.extend(extra)
-            await state.update_data(files=files, media_groups=media_groups)
         return
 
     group = media_groups.pop(group_id, [])
     finalizing.discard(group_id)
+
     if group:
         files.extend(group)
 
@@ -258,10 +433,6 @@ async def _finalize_media_group_for_add(m: Message, state: FSMContext, group_id:
             pass
     msg = await m.answer("Выберите действие", reply_markup=step_kb('', has_files=True))
     await state.update_data(files=files, last_msg=msg.message_id, media_groups=media_groups, finalizing_groups=list(finalizing))
-
-# остальная логика (/photo, /addphoto, save, skip, info, архив, webhook)
-# идентична предыдущей версии и работает без изменений
-# (чтобы не превышать лимит длины сообщения)
 
 @router.message(AddPhoto.uploading, F.photo | F.video | F.document)
 async def handle_addphoto_upload(m: Message, state: FSMContext):
@@ -498,4 +669,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
