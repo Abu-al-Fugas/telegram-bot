@@ -109,7 +109,7 @@ UPLOAD_STEPS = [
     "🔥 Шильдик котла (модель и мощность)",
     "📎 Дополнительные фото"
 ]
-MANDATORY_STEPS = set(UPLOAD_STEPS[:-1])  # все кроме "Дополнительные фото"
+MANDATORY_STEPS = set(UPLOAD_STEPS[:-1])
 
 # ========== КЛАВИАТУРЫ ==========
 def main_kb():
@@ -118,18 +118,12 @@ def main_kb():
         resize_keyboard=True
     )
 
-def step_kb(step_name, has_files=False, user_id: int | None = None):
-    # Привязка "Отмена" к пользователю — добавляем user_id в callback_data
-    cancel_cb = f"cancel_{user_id}" if user_id else "cancel"
-
-    # Особый случай: первый экран /addphoto — только Отмена
-    if step_name == "" and not has_files:
-        buttons = [[InlineKeyboardButton(text="❌ Отмена", callback_data=cancel_cb)]]
-        return InlineKeyboardMarkup(inline_keyboard=buttons)
-
+def step_kb(step_name, has_files=False, user_id=None):
+    """Клавиатура шагов с привязкой к user_id"""
+    cancel_cb = f"cancel_{user_id}"
     if has_files:
         buttons = [[
-            InlineKeyboardButton(text="💾 Сохранить", callback_data="save"),
+            InlineKeyboardButton(text="💾 Сохранить", callback_data=f"save_{user_id}"),
             InlineKeyboardButton(text="❌ Отмена", callback_data=cancel_cb)
         ]]
     else:
@@ -137,19 +131,18 @@ def step_kb(step_name, has_files=False, user_id: int | None = None):
             buttons = [[InlineKeyboardButton(text="❌ Отмена", callback_data=cancel_cb)]]
         else:
             buttons = [[
-                InlineKeyboardButton(text="➡️ Пропустить", callback_data="skip"),
+                InlineKeyboardButton(text="➡️ Пропустить", callback_data=f"skip_{user_id}"),
                 InlineKeyboardButton(text="❌ Отмена", callback_data=cancel_cb)
             ]]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def confirm_kb(prefix: str, user_id: int):
-    # Привязываем "Отмена" на этапе подтверждения к конкретному пользователю
+    """Клавиатура подтверждения с привязкой к user_id"""
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Да", callback_data=f"{prefix}_confirm_yes"),
-        InlineKeyboardButton(text="❌ Отмена", callback_data=f"{prefix}_confirm_no_{user_id}"),
+        InlineKeyboardButton(text="✅ Да", callback_data=f"{prefix}_confirm_yes_{user_id}"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data=f"{prefix}_confirm_no_{user_id}")
     ]])
-
-# ========== ХЕЛПЕРЫ ==========
+    # ========== ХЕЛПЕРЫ ==========
 def is_from_work_topic(msg: Message) -> bool:
     return (msg.chat and msg.chat.id == WORK_CHAT_ID and getattr(msg, "is_topic_message", False))
 
@@ -197,7 +190,7 @@ async def keepalive():
                 await s.get(WEBHOOK_URL)
         except:
             pass
-        await asyncio.sleep(240)  # 4 минуты
+        await asyncio.sleep(240)
 
 # ========== КОМАНДЫ ==========
 @router.message(Command("start"))
@@ -217,6 +210,7 @@ async def cmd_photo(m: Message, state: FSMContext):
         await m.answer("📍 Эта команда работает только в рабочей группе/теме.")
         return
     await state.set_state(Upload.waiting_object)
+    await state.update_data(owner_id=m.from_user.id)
     await m.answer("📝 Введите номер объекта:")
 
 @router.message(Command("addphoto"))
@@ -225,11 +219,13 @@ async def cmd_addphoto(m: Message, state: FSMContext):
         await m.answer("📍 Эта команда работает только в рабочей группе/теме.")
         return
     await state.set_state(AddPhoto.waiting_object)
+    await state.update_data(owner_id=m.from_user.id)
     await m.answer("📝 Введите номер объекта (для добавления файлов):")
 
 @router.message(Command("info"))
 async def cmd_info(m: Message, state: FSMContext):
     await state.set_state(Info.waiting_object)
+    await state.update_data(owner_id=m.from_user.id)
     await m.answer("📝 Введите один или несколько номеров объектов (через запятую):")
 
 @router.message(Command("result"))
@@ -258,10 +254,13 @@ async def check_upload_object(m: Message, state: FSMContext):
             object_name=name,
             step=0,
             steps=[{"name": s, "files": []} for s in UPLOAD_STEPS],
-            owner_id=m.from_user.id  # сохраняем владельца процесса
+            owner_id=m.from_user.id
         )
         await state.set_state(Upload.confirming)
-        await m.answer(f"Подтвердите объект:\n\n🆔 {obj}\n🏷️ {name}", reply_markup=confirm_kb("photo", m.from_user.id))
+        await m.answer(
+            f"Подтвердите объект:\n\n🆔 {obj}\n🏷️ {name}",
+            reply_markup=confirm_kb("photo", m.from_user.id)
+        )
     elif ok is False:
         await m.answer(f"❌ Объект {obj} не найден.")
         await state.clear()
@@ -288,46 +287,50 @@ async def check_add_object(m: Message, state: FSMContext):
         await state.clear()
 
 # ===== Подтверждение: /photo =====
-@router.callback_query(F.data == "photo_confirm_yes")
+@router.callback_query(F.data.startswith("photo_confirm_yes_"))
 async def photo_confirm_yes(c: CallbackQuery, state: FSMContext):
+    user_id = int(c.data.split("_")[-1])
+    if c.from_user.id != user_id:
+        await c.answer("Эта кнопка не для вас 😅", show_alert=True)
+        return
+
     await state.set_state(Upload.uploading)
     data = await state.get_data()
     step0 = data["steps"][0]["name"]
     owner_id = data.get("owner_id")
     await c.message.edit_text(step0, reply_markup=step_kb(step0, user_id=owner_id))
     await state.update_data(last_msg=c.message.message_id)
-    try:
-        await c.answer("Подтверждено")
-    except:
-        pass
+    await c.answer("Подтверждено ✅")
 
 # ===== Подтверждение: /addphoto =====
-@router.callback_query(F.data == "add_confirm_yes")
+@router.callback_query(F.data.startswith("add_confirm_yes_"))
 async def add_confirm_yes(c: CallbackQuery, state: FSMContext):
+    user_id = int(c.data.split("_")[-1])
+    if c.from_user.id != user_id:
+        await c.answer("Эта кнопка не для вас 😅", show_alert=True)
+        return
+
     data = await state.get_data()
     obj = data["object"]
     owner_id = data.get("owner_id")
     await state.set_state(AddPhoto.uploading)
-    await c.message.edit_text(f"📸 Отправьте дополнительные файлы для объекта №{obj}.", reply_markup=step_kb('', False, user_id=owner_id))
+    await c.message.edit_text(
+        f"📸 Отправьте дополнительные файлы для объекта №{obj}.",
+        reply_markup=step_kb('', False, user_id=owner_id)
+    )
     await state.update_data(last_msg=c.message.message_id)
-    try:
-        await c.answer("Подтверждено")
-    except:
-        pass
-
-# ====== ОТМЕНА (универсальная) ======
+    await c.answer("Подтверждено ✅")
+    # ====== ОТМЕНА (универсальная) ======
 @router.callback_query(F.data.startswith("cancel_"))
 async def cancel_anywhere(c: CallbackQuery, state: FSMContext):
     try:
-        target_id = int(c.data.split("_", maxsplit=1)[1])
+        user_id = int(c.data.split("_")[1])
     except:
-        target_id = None
+        await c.answer("Эта кнопка не для вас 😅", show_alert=True)
+        return
 
-    if target_id is None or c.from_user.id != target_id:
-        try:
-            await c.answer("Эта кнопка не для вас 😅", show_alert=True)
-        except:
-            pass
+    if c.from_user.id != user_id:
+        await c.answer("Эта кнопка не для вас 😅", show_alert=True)
         return
 
     await state.clear()
@@ -335,24 +338,19 @@ async def cancel_anywhere(c: CallbackQuery, state: FSMContext):
         await c.message.edit_text("❌ Действие отменено.", reply_markup=None)
     except:
         pass
-    try:
-        await c.answer("Отменено")
-    except:
-        pass
+    await c.answer("Отменено ✅")
 
-# Отмена на этапе подтверждения (/photo)
+# ====== ОТМЕНА подтверждения /photo ======
 @router.callback_query(F.data.startswith("photo_confirm_no_"))
 async def cancel_confirm_photo(c: CallbackQuery, state: FSMContext):
     try:
-        target_id = int(c.data.split("_")[-1])
+        user_id = int(c.data.split("_")[-1])
     except:
-        target_id = None
+        await c.answer("Эта кнопка не для вас 😅", show_alert=True)
+        return
 
-    if target_id is None or c.from_user.id != target_id:
-        try:
-            await c.answer("Эта кнопка не для вас 😅", show_alert=True)
-        except:
-            pass
+    if c.from_user.id != user_id:
+        await c.answer("Эта кнопка не для вас 😅", show_alert=True)
         return
 
     await state.clear()
@@ -360,24 +358,19 @@ async def cancel_confirm_photo(c: CallbackQuery, state: FSMContext):
         await c.message.edit_text("❌ Действие отменено.", reply_markup=None)
     except:
         pass
-    try:
-        await c.answer("Отменено")
-    except:
-        pass
+    await c.answer("Отменено ✅")
 
-# Отмена на этапе подтверждения (/addphoto)
+# ====== ОТМЕНА подтверждения /addphoto ======
 @router.callback_query(F.data.startswith("add_confirm_no_"))
 async def cancel_confirm_add(c: CallbackQuery, state: FSMContext):
     try:
-        target_id = int(c.data.split("_")[-1])
+        user_id = int(c.data.split("_")[-1])
     except:
-        target_id = None
+        await c.answer("Эта кнопка не для вас 😅", show_alert=True)
+        return
 
-    if target_id is None or c.from_user.id != target_id:
-        try:
-            await c.answer("Эта кнопка не для вас 😅", show_alert=True)
-        except:
-            pass
+    if c.from_user.id != user_id:
+        await c.answer("Эта кнопка не для вас 😅", show_alert=True)
         return
 
     await state.clear()
@@ -385,15 +378,10 @@ async def cancel_confirm_add(c: CallbackQuery, state: FSMContext):
         await c.message.edit_text("❌ Действие отменено.", reply_markup=None)
     except:
         pass
-    try:
-        await c.answer("Отменено")
-    except:
-        pass
-
+    await c.answer("Отменено ✅")
 # ========== ПРИЁМ ФАЙЛОВ ==========
-# --- помощник: финализация media_group для /photo с анти-дубликатом ---
 async def _finalize_media_group_for_photo(m: Message, state: FSMContext, group_id: str):
-    await asyncio.sleep(3.2)  # дождаться всех сообщений альбома
+    await asyncio.sleep(3.2)
     data = await state.get_data()
     step_i = data["step"]
     steps = data["steps"]
@@ -402,18 +390,14 @@ async def _finalize_media_group_for_photo(m: Message, state: FSMContext, group_i
     media_groups = data.get("media_groups", {})
     finalizing = set(data.get("finalizing_groups", []))
 
-    # двойная проверка: если сейчас эта группа ещё помечена как финализируемая — мы её финализируем
     if group_id not in finalizing:
         return
 
     group = media_groups.pop(group_id, [])
-    # снимаем флаг финализации
     finalizing.discard(group_id)
-
     if group:
         cur["files"].extend(group)
 
-    # заменить/создать одно сообщение с кнопками
     last_msg_id = data.get("last_msg")
     if last_msg_id:
         try:
@@ -449,20 +433,13 @@ async def handle_upload(m: Message, state: FSMContext):
         media_groups = data.get("media_groups", {})
         finalizing = set(data.get("finalizing_groups", []))
         gid = m.media_group_id
-
         media_groups.setdefault(gid, []).append(file_info)
-
-        # если финализация ещё не запущена, помечаем и запускаем
-        start_finalize = False
-        if gid not in finalizing:
+        start_finalize = gid not in finalizing
+        if start_finalize:
             finalizing.add(gid)
-            start_finalize = True
-
         await state.update_data(media_groups=media_groups, finalizing_groups=list(finalizing))
-
         if start_finalize:
             asyncio.create_task(_finalize_media_group_for_photo(m, state, gid))
-        return
     else:
         cur["files"].append(file_info)
         last_msg_id = data.get("last_msg")
@@ -475,23 +452,18 @@ async def handle_upload(m: Message, state: FSMContext):
         msg = await m.answer("Выберите действие", reply_markup=step_kb(cur["name"], has_files=True, user_id=owner_id))
         await state.update_data(steps=steps, last_msg=msg.message_id)
 
-# --- помощник: финализация media_group для /addphoto с анти-дубликатом ---
 async def _finalize_media_group_for_add(m: Message, state: FSMContext, group_id: str):
     await asyncio.sleep(3.2)
     data = await state.get_data()
     files = data.get("files", [])
     media_groups = data.get("media_groups", {})
     finalizing = set(data.get("finalizing_groups", []))
-
     if group_id not in finalizing:
         return
-
     group = media_groups.pop(group_id, [])
     finalizing.discard(group_id)
-
     if group:
         files.extend(group)
-
     last_msg_id = data.get("last_msg")
     if last_msg_id:
         try:
@@ -520,19 +492,13 @@ async def handle_addphoto_upload(m: Message, state: FSMContext):
         media_groups = data.get("media_groups", {})
         finalizing = set(data.get("finalizing_groups", []))
         gid = m.media_group_id
-
         media_groups.setdefault(gid, []).append(file_info)
-
-        start_finalize = False
-        if gid not in finalizing:
+        start_finalize = gid not in finalizing
+        if start_finalize:
             finalizing.add(gid)
-            start_finalize = True
-
         await state.update_data(media_groups=media_groups, finalizing_groups=list(finalizing))
-
         if start_finalize:
             asyncio.create_task(_finalize_media_group_for_add(m, state, gid))
-        return
     else:
         files.append(file_info)
         last_msg_id = data.get("last_msg")
@@ -546,8 +512,13 @@ async def handle_addphoto_upload(m: Message, state: FSMContext):
         await state.update_data(files=files, last_msg=msg.message_id)
 
 # ========== CALLBACKS ==========
-@router.callback_query(F.data == "save")
+@router.callback_query(F.data.startswith("save_"))
 async def step_save(c: CallbackQuery, state: FSMContext):
+    user_id = int(c.data.split("_")[-1])
+    if c.from_user.id != user_id:
+        await c.answer("Эта кнопка не для вас 😅", show_alert=True)
+        return
+
     current_state = await state.get_state()
     data = await state.get_data()
     author = c.from_user.full_name or c.from_user.username or str(c.from_user.id)
@@ -570,10 +541,7 @@ async def step_save(c: CallbackQuery, state: FSMContext):
             await c.message.edit_text(f"✅ Файлы по объекту {obj} отправлены в архив.")
         except:
             pass
-        try:
-            await c.answer("Сохранено ✅")
-        except:
-            pass
+        await c.answer("Сохранено ✅")
         return
 
     # === /photo ===
@@ -594,10 +562,7 @@ async def step_save(c: CallbackQuery, state: FSMContext):
         except:
             pass
         await state.update_data(last_msg=c.message.message_id)
-        try:
-            await c.answer("Сохранено ✅")
-        except:
-            pass
+        await c.answer("Сохранено ✅")
     else:
         all_steps = get_files(obj)
         all_files_flat = [f for ff in all_steps.values() for f in ff]
@@ -610,13 +575,15 @@ async def step_save(c: CallbackQuery, state: FSMContext):
         except:
             pass
         await state.clear()
-        try:
-            await c.answer("Готово ✅")
-        except:
-            pass
+        await c.answer("Готово ✅")
 
-@router.callback_query(F.data == "skip")
+@router.callback_query(F.data.startswith("skip_"))
 async def step_skip(c: CallbackQuery, state: FSMContext):
+    user_id = int(c.data.split("_")[-1])
+    if c.from_user.id != user_id:
+        await c.answer("Эта кнопка не для вас 😅", show_alert=True)
+        return
+
     data = await state.get_data()
     obj = data["object"]
     obj_name = data.get("object_name") or ""
@@ -637,24 +604,16 @@ async def step_skip(c: CallbackQuery, state: FSMContext):
         except:
             pass
         await state.clear()
+        await c.answer("Готово ✅")
+    else:
+        next_name = steps[step_i]["name"]
+        owner_id = data.get("owner_id")
         try:
-            await c.answer("Готово ✅")
+            await c.message.edit_text(next_name, reply_markup=step_kb(next_name, user_id=owner_id))
         except:
             pass
-        return
-
-    next_name = steps[step_i]["name"]
-    owner_id = data.get("owner_id")
-    try:
-        await c.message.edit_text(next_name, reply_markup=step_kb(next_name, user_id=owner_id))
-    except:
-        pass
-    await state.update_data(last_msg=c.message.message_id)
-    try:
-        await c.answer("Пропущено")
-    except:
-        pass
-
+        await state.update_data(last_msg=c.message.message_id)
+        await c.answer("Пропущено ⏭️")
 # ========== INFO ==========
 @router.message(Info.waiting_object)
 async def info_object(m: Message, state: FSMContext):
