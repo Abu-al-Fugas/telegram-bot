@@ -19,6 +19,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramRetryAfter
 from aiohttp import web
+import json
 
 # ========== НАСТРОЙКИ ==========
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -31,7 +32,13 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
 
+# 👑 Главный админ(ы)
+ADMIN_IDS = {7277619113}  # Mr. X
+
 # ========== МАРШРУТИЗАЦИЯ ТЕМ (WORK → ARCHIVE) ==========
+# Формат:
+# TOPIC_MAP[work_chat_id][work_thread_id] = {"chat_id": archive_chat_id, "thread_id": archive_thread_id}
+# ВНИМАНИЕ: при сохранении в JSON ключи становятся строками — ниже в коде есть нормализация доступа.
 TOPIC_MAP = {
     # ==== ТЕКУЩИЕ ЖИВЫЕ МАРШРУТЫ ====
     -1003281117256: {  # Рабочая группа A (dagestan.xlsx)
@@ -100,10 +107,11 @@ TOPIC_MAP = {
 }
 
 # ========== ПРИВЯЗКА EXCEL К РАБОЧИМ ГРУППАМ ==========
+# Если группа не в словаре — бот предупредит, что к группе не привязан Excel-документ.
 EXCEL_MAP = {
     -1003281117256: "dagestan.xlsx",
     -1003237477689: "nazran.xlsx",
-    # Будущие рабочие группы
+    # Будущие рабочие группы — сразу с файлами-заглушками:
     -1004000000001: "bryunsk.xlsx",
     -1004000000002: "orel.xlsx",
     -1004000000003: "objects.xlsx",
@@ -122,7 +130,22 @@ def init_db():
             author TEXT,
             completed_at TEXT
         )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS settings(
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )""")
         conn.commit()
+
+def db_set(key, value):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+        conn.commit()
+
+def db_get(key):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        cur = conn.execute("SELECT value FROM settings WHERE key=?", (key,))
+        r = cur.fetchone()
+        return r[0] if r else None
 
 def save_files(object_id, step, files, author):
     with closing(sqlite3.connect(DB_PATH)) as conn:
@@ -158,6 +181,33 @@ def list_completed():
         cur = conn.execute("SELECT object_id, author, completed_at FROM completed ORDER BY object_id")
         return cur.fetchall()
 
+# ========== ЗАГРУЗКА/СОХРАНЕНИЕ НАСТРОЕК ==========
+def load_settings():
+    global TOPIC_MAP, EXCEL_MAP
+    try:
+        val1 = db_get("TOPIC_MAP")
+        val2 = db_get("EXCEL_MAP")
+        if val1:
+            TOPIC_MAP = json.loads(val1)
+        if val2:
+            EXCEL_MAP = json.loads(val2)
+        print("✅ Настройки (TOPIC_MAP/EXCEL_MAP) загружены из БД.")
+    except Exception as e:
+        print(f"⚠️ Ошибка загрузки настроек: {e}")
+
+def save_settings():
+    # Всегда сериализуем с ключами-строками (для единообразия)
+    def stringify_keys(d):
+        if isinstance(d, dict):
+            return {str(k): stringify_keys(v) for k, v in d.items()}
+        elif isinstance(d, list):
+            return [stringify_keys(x) for x in d]
+        else:
+            return d
+
+    db_set("TOPIC_MAP", json.dumps(stringify_keys(TOPIC_MAP), ensure_ascii=False))
+    db_set("EXCEL_MAP", json.dumps(stringify_keys(EXCEL_MAP), ensure_ascii=False))
+
 # ========== СОСТОЯНИЯ ==========
 class Upload(StatesGroup):
     waiting_object = State()
@@ -171,6 +221,13 @@ class AddPhoto(StatesGroup):
 
 class Info(StatesGroup):
     waiting_object = State()
+
+class AdminState(StatesGroup):
+    waiting_command = State()
+    waiting_route = State()
+    waiting_route_del = State()
+    waiting_excel = State()
+    waiting_excel_del = State()
 
 # ========== КОНСТАНТЫ ==========
 UPLOAD_STEPS = [
@@ -188,9 +245,19 @@ UPLOAD_STEPS = [
 MANDATORY_STEPS = set(UPLOAD_STEPS[:-1])  # все кроме "Дополнительные фото"
 
 # ========== КЛАВИАТУРЫ ==========
+def admin_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 Посмотреть маршруты", callback_data="admin_routes")],
+        [InlineKeyboardButton(text="🧭 Добавить маршрут", callback_data="admin_add_route")],
+        [InlineKeyboardButton(text="❌ Удалить маршрут", callback_data="admin_del_route")],
+        [InlineKeyboardButton(text="📘 Посмотреть Excel", callback_data="admin_excel")],
+        [InlineKeyboardButton(text="➕ Добавить Excel", callback_data="admin_add_excel")],
+        [InlineKeyboardButton(text="🗑 Удалить Excel", callback_data="admin_del_excel")],
+    ])
+
 def main_kb():
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="/addphoto"), KeyboardButton(text="/info"), KeyboardButton(text="/photo")]],
+        keyboard=[[KeyboardButton(text="/photo"), KeyboardButton(text="/addphoto"), KeyboardButton(text="/info")]],
         resize_keyboard=True
     )
 
@@ -220,9 +287,25 @@ def confirm_kb(prefix: str, user_id: int):
     ]])
 
 # ========== ХЕЛПЕРЫ ==========
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
+
 def get_excel_filename_for_chat(chat_id: int) -> str | None:
-    """Возвращает имя Excel-файла, если привязан. Иначе None."""
-    return EXCEL_MAP.get(chat_id)
+    # Учитываем, что ключи могли быть сохранены как строки в JSON
+    return (EXCEL_MAP.get(chat_id)
+            or EXCEL_MAP.get(str(chat_id)))
+
+def mapping_lookup(work_chat_id: int | str, work_thread_id: int | str):
+    """
+    Возвращает словарь {"chat_id": ..., "thread_id": ...} для маршрута,
+    учитывая, что ключи могли быть сериализованы в строки.
+    """
+    # прямой доступ
+    sub = TOPIC_MAP.get(work_chat_id) or TOPIC_MAP.get(str(work_chat_id))
+    if not sub:
+        return None
+    m = sub.get(work_thread_id) or sub.get(str(work_thread_id))
+    return m
 
 def check_object_excel(chat_id: int, object_id: str):
     """Проверка объекта в Excel, привязанном к группе chat_id"""
@@ -258,6 +341,16 @@ def get_object_info(chat_id: int, object_id: str):
         return None
     except Exception as e:
         return {"error": f"{filename}: {e}"}
+
+async def safe_call(coro, pause=0.25):
+    try:
+        res = await coro
+        await asyncio.sleep(pause)
+        return res
+    except TelegramRetryAfter as e:
+        await asyncio.sleep(e.retry_after + 1)
+        return await coro
+
 # ========== KEEPALIVE ==========
 async def keepalive():
     while True:
@@ -268,7 +361,178 @@ async def keepalive():
             pass
         await asyncio.sleep(240)  # 4 минуты
 
-# ========== КОМАНДЫ ==========
+# ========== АДМИН-ПАНЕЛЬ ==========
+@router.message(Command("admin"))
+async def admin_panel(m: Message, state: FSMContext):
+    if not is_admin(m.from_user.id):
+        await m.answer("🚫 У вас нет доступа к админ-панели.")
+        return
+    await m.answer("👑 Панель администратора:", reply_markup=admin_kb())
+    await state.set_state(AdminState.waiting_command)
+
+@router.callback_query(F.data == "admin_routes")
+async def show_routes(c: CallbackQuery):
+    if not is_admin(c.from_user.id):
+        await c.answer("🚫 Нет доступа", show_alert=True)
+        return
+    text = "📋 <b>Маршруты WORK → ARCHIVE</b>\n\n"
+    for work_chat, threads in (TOPIC_MAP.items() if isinstance(TOPIC_MAP, dict) else []):
+        text += f"<b>{work_chat}</b>:\n"
+        if isinstance(threads, dict) and threads:
+            for t_id, dest in threads.items():
+                try:
+                    dst = f"{dest['chat_id']}_{dest['thread_id']}"
+                except:
+                    dst = str(dest)
+                text += f"  🧩 {t_id} → {dst}\n"
+        else:
+            text += "  (пока нет настроенных тем)\n"
+        text += "\n"
+    await c.message.edit_text(text or "—", parse_mode="HTML", reply_markup=admin_kb())
+    await c.answer()
+
+@router.callback_query(F.data == "admin_add_route")
+async def add_route_start(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c.from_user.id):
+        await c.answer("🚫 Нет доступа", show_alert=True)
+        return
+    await c.message.edit_text(
+        "🧭 Введите данные маршрута одной строкой:\n\n"
+        "<code>work_chat_id work_thread_id archive_chat_id archive_thread_id</code>\n\n"
+        "Пример:\n<code>-1003281117256 101 -1003250982118 401</code>",
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminState.waiting_route)
+    await c.answer()
+
+@router.message(AdminState.waiting_route)
+async def add_route_process(m: Message, state: FSMContext):
+    if not is_admin(m.from_user.id):
+        await m.answer("🚫 Нет доступа.")
+        return
+    try:
+        wc, wt, ac, at = m.text.strip().split()
+        # храним ключи как строки — так безопаснее для JSON
+        wc_s, wt_s = str(int(wc)), str(int(wt))
+        ac_i, at_i = int(ac), int(at)
+        TOPIC_MAP.setdefault(wc_s, {})[wt_s] = {"chat_id": ac_i, "thread_id": at_i}
+        save_settings()
+        await m.answer(f"✅ Добавлен маршрут:\n{wc_s}_{wt_s} → {ac_i}_{at_i}", reply_markup=admin_kb())
+    except Exception as e:
+        await m.answer(f"⚠️ Ошибка: {e}", reply_markup=admin_kb())
+    await state.clear()
+
+@router.callback_query(F.data == "admin_del_route")
+async def del_route_start(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c.from_user.id):
+        await c.answer("🚫 Нет доступа", show_alert=True)
+        return
+    await c.message.edit_text(
+        "🗑 Удаление маршрута.\nОтправьте одной строкой:\n\n"
+        "<code>work_chat_id work_thread_id</code>\n\n"
+        "Пример:\n<code>-1003281117256 101</code>",
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminState.waiting_route_del)
+    await c.answer()
+
+@router.message(AdminState.waiting_route_del)
+async def del_route_process(m: Message, state: FSMContext):
+    if not is_admin(m.from_user.id):
+        await m.answer("🚫 Нет доступа.")
+        return
+    try:
+        wc, wt = m.text.strip().split()
+        wc_s, wt_s = str(int(wc)), str(int(wt))
+        threads = TOPIC_MAP.get(wc_s)
+        if not threads or wt_s not in threads:
+            await m.answer("❌ Такой маршрут не найден.", reply_markup=admin_kb())
+        else:
+            threads.pop(wt_s, None)
+            if not threads:
+                TOPIC_MAP.pop(wc_s, None)
+            save_settings()
+            await m.answer(f"✅ Удалён маршрут: {wc_s}_{wt_s}", reply_markup=admin_kb())
+    except Exception as e:
+        await m.answer(f"⚠️ Ошибка: {e}", reply_markup=admin_kb())
+    await state.clear()
+
+@router.callback_query(F.data == "admin_excel")
+async def show_excel(c: CallbackQuery):
+    if not is_admin(c.from_user.id):
+        await c.answer("🚫 Нет доступа", show_alert=True)
+        return
+    text = "📘 <b>Привязки Excel:</b>\n\n"
+    for k, v in (EXCEL_MAP.items() if isinstance(EXCEL_MAP, dict) else []):
+        text += f"{k} → <code>{v}</code>\n"
+    await c.message.edit_text(text or "—", parse_mode="HTML", reply_markup=admin_kb())
+    await c.answer()
+
+@router.callback_query(F.data == "admin_add_excel")
+async def add_excel_start(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c.from_user.id):
+        await c.answer("🚫 Нет доступа", show_alert=True)
+        return
+    await c.message.edit_text(
+        "📎 Добавление/замена Excel:\nОтправьте одной строкой:\n\n"
+        "<code>chat_id filename.xlsx</code>\n\n"
+        "Пример:\n<code>-1003281117256 dagestan.xlsx</code>",
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminState.waiting_excel)
+    await c.answer()
+
+@router.message(AdminState.waiting_excel)
+async def add_excel_process(m: Message, state: FSMContext):
+    if not is_admin(m.from_user.id):
+        await m.answer("🚫 Нет доступа.")
+        return
+    try:
+        chat_id_s, file = m.text.strip().split()
+        chat_id_s = str(int(chat_id_s))
+        EXCEL_MAP[chat_id_s] = file
+        save_settings()
+        await m.answer(f"✅ Привязан Excel: {chat_id_s} → {file}", reply_markup=admin_kb())
+    except Exception as e:
+        await m.answer(f"⚠️ Ошибка: {e}", reply_markup=admin_kb())
+    await state.clear()
+
+@router.callback_query(F.data == "admin_del_excel")
+async def del_excel_start(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c.from_user.id):
+        await c.answer("🚫 Нет доступа", show_alert=True)
+        return
+    await c.message.edit_text(
+        "🗑 Удаление Excel-привязки:\nОтправьте одной строкой:\n\n"
+        "<code>chat_id</code>\n\n"
+        "Пример:\n<code>-1003281117256</code>",
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminState.waiting_excel_del)
+    await c.answer()
+
+@router.message(AdminState.waiting_excel_del)
+async def del_excel_process(m: Message, state: FSMContext):
+    if not is_admin(m.from_user.id):
+        await m.answer("🚫 Нет доступа.")
+        return
+    try:
+        chat_id_s = str(int(m.text.strip()))
+        if chat_id_s in EXCEL_MAP:
+            EXCEL_MAP.pop(chat_id_s, None)
+        elif int(chat_id_s) in EXCEL_MAP:
+            EXCEL_MAP.pop(int(chat_id_s), None)
+        else:
+            await m.answer("❌ Привязка не найдена.", reply_markup=admin_kb())
+            await state.clear()
+            return
+        save_settings()
+        await m.answer(f"✅ Удалена привязка Excel для {chat_id_s}", reply_markup=admin_kb())
+    except Exception as e:
+        await m.answer(f"⚠️ Ошибка: {e}", reply_markup=admin_kb())
+    await state.clear()
+
+# ========== КОМАНДЫ ПОЛЬЗОВАТЕЛЯ ==========
 @router.message(Command("start"))
 async def cmd_start(m: Message):
     await m.answer(
@@ -276,7 +540,7 @@ async def cmd_start(m: Message):
         "📸 /photo — новая загрузка\n"
         "📎 /addphoto — добавить фото\n"
         "ℹ️ /info — информация по объектам\n"
-        "⚙️ Работает только в рабочих темах (форум-темы).",
+        "⚙️ Работает в темах форумов (супергруппы).",
         reply_markup=main_kb()
     )
 
@@ -328,7 +592,7 @@ async def cmd_result(m: Message):
     lines = ["✅ Обработанные объекты (сценарий /photo):"]
     for oid, author, ts in rows:
         try:
-            ts_h = datetime.fromisoformat(ts).strftime("%d.%m.%Y %H:%М")
+            ts_h = datetime.fromisoformat(ts).strftime("%d.%m.%Y %H:%M")
         except:
             ts_h = ts
         lines.append(f"• #{oid} — {author} ({ts_h})")
@@ -760,13 +1024,13 @@ async def info_object(m: Message, state: FSMContext):
 async def post_archive_single_group(object_id: str, object_name: str, files: list, author: str, state_data: dict):
     """
     Отправка заголовка, медиа и документов в соответствующую архивную группу и тему.
-    Соответствие определяется по TOPIC_MAP[work_chat_id][work_thread_id].
+    Соответствие определяется по TOPIC_MAP[work_chat_id][work_thread_id] (нормализация ключей есть).
     """
     try:
         work_chat_id = state_data.get("work_chat_id")
         work_thread_id = state_data.get("work_thread_id")
 
-        mapping = TOPIC_MAP.get(work_chat_id, {}).get(work_thread_id)
+        mapping = mapping_lookup(work_chat_id, work_thread_id)
         if not mapping or not mapping.get("chat_id") or not mapping.get("thread_id"):
             # Сообщим прямо в рабочую тему, что маршрут не настроен
             try:
@@ -831,15 +1095,17 @@ async def post_archive_single_group(object_id: str, object_name: str, files: lis
 # ========== WEBHOOK / APP ==========
 async def on_startup():
     init_db()
+    load_settings()
     webhook_url = f"{WEBHOOK_URL}/{TOKEN}"
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(webhook_url)
     await bot.set_my_commands([
+        BotCommand(command="start", description="Запуск бота"),
+        BotCommand(command="photo", description="Загрузка фото"),
         BotCommand(command="addphoto", description="Добавить фото"),
-        BotCommand(command="info", description="Информация об объекте"),
-        BotCommand(command="photo", description="Загрузить фото по объекту"),
+        BotCommand(command="info", description="Информация по объекту"),
         BotCommand(command="result", description="Завершённые загрузки"),
-        BotCommand(command="start", description="Перезапуск бота"),
+        BotCommand(command="admin", description="Админ-панель"),
     ])
     asyncio.create_task(keepalive())
     print("✅ Webhook установлен:", webhook_url)
@@ -865,4 +1131,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
