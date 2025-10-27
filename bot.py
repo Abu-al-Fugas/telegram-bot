@@ -22,9 +22,7 @@ from aiohttp import web
 
 # ========== НАСТРОЙКИ ==========
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-WORK_CHAT_ID = int(os.environ.get("WORK_CHAT_ID", "0"))
-ARCHIVE_CHAT_ID = int(os.environ.get("ARCHIVE_CHAT_ID", "0"))
-WEBHOOK_URL = "https://telegram-bot-b6pn.onrender.com"
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://telegram-bot-b6pn.onrender.com")
 PORT = int(os.environ.get("PORT", 10000))
 DB_PATH = "files.db"
 
@@ -32,6 +30,83 @@ bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
+
+# ========== МАРШРУТИЗАЦИЯ ТЕМ (WORK -> ARCHIVE) ==========
+# Формат:
+# TOPIC_MAP[work_chat_id][work_thread_id] = {"chat_id": archive_chat_id, "thread_id": archive_thread_id}
+TOPIC_MAP = {
+    # ==== ТЕКУЩИЕ ЖИВЫЕ МАРШРУТЫ (2 рабочие группы → их архивы) ====
+    -1003281117256: {  # Рабочая группа A (dagestan.xlsx)
+        3: {"chat_id": -1003250982118, "thread_id": 3},  # из темы 3 → в тему 3
+        # ----- 8 заглушек тем на будущее (поставь реальные thread_id слева/справа) -----
+        # Пример: 101: {"chat_id": -1003250982118, "thread_id": 401},
+        # 102: {"chat_id": -1003250982118, "thread_id": 402},
+        # 103: {"chat_id": -1003250982118, "thread_id": 403},
+        # 104: {"chat_id": -1003250982118, "thread_id": 404},
+        # 105: {"chat_id": -1003250982118, "thread_id": 405},
+        # 106: {"chat_id": -1003250982118, "thread_id": 406},
+        # 107: {"chat_id": -1003250982118, "thread_id": 407},
+        # 108: {"chat_id": -1003250982118, "thread_id": 408},
+    },
+    -1003237477689: {  # Рабочая группа B (nazran.xlsx)
+        15: {"chat_id": -1003252316518, "thread_id": 6},  # из темы 15 → в тему 6
+        # ----- 8 заглушек тем на будущее -----
+        # 201: {"chat_id": -1003252316518, "thread_id": 501},
+        # 202: {"chat_id": -1003252316518, "thread_id": 501},
+        # 203: {"chat_id": -1003252316518, "thread_id": 502},
+        # 204: {"chat_id": -1003252316518, "thread_id": 502},
+        # 205: {"chat_id": -1003252316518, "thread_id": 503},
+        # 206: {"chat_id": -1003252316518, "thread_id": 503},
+        # 207: {"chat_id": -1003252316518, "thread_id": 504},
+        # 208: {"chat_id": -1003252316518, "thread_id": 504},
+    },
+
+    # ====== ЗАГЛУШКИ: 3 будущих рабочие группы (по 10 тем каждая) ======
+    # Пример: замени CHAT_ID и THREAD_ID на реальные, когда создашь.
+    # -1004000000001: {
+    #     1: {"chat_id": -1005000000001, "thread_id": 1},
+    #     2: {"chat_id": -1005000000001, "thread_id": 2},
+    #     3: {"chat_id": -1005000000001, "thread_id": 3},
+    #     4: {"chat_id": -1005000000001, "thread_id": 4},
+    #     5: {"chat_id": -1005000000001, "thread_id": 5},
+    #     6: {"chat_id": -1005000000001, "thread_id": 6},
+    #     7: {"chat_id": -1005000000001, "thread_id": 7},
+    #     8: {"chat_id": -1005000000001, "thread_id": 8},
+    #     9: {"chat_id": -1005000000001, "thread_id": 9},
+    #     10: {"chat_id": -1005000000001, "thread_id": 10},
+    # },
+    # -1004000000002: {
+    #     1: {"chat_id": -1005000000002, "thread_id": 1},
+    #     2: {"chat_id": -1005000000002, "thread_id": 2},
+    #     3: {"chat_id": -1005000000002, "thread_id": 3},
+    #     4: {"chat_id": -1005000000002, "thread_id": 4},
+    #     5: {"chat_id": -1005000000002, "thread_id": 5},
+    #     6: {"chat_id": -1005000000002, "thread_id": 6},
+    #     7: {"chat_id": -1005000000002, "thread_id": 7},
+    #     8: {"chat_id": -1005000000002, "thread_id": 8},
+    #     9: {"chat_id": -1005000000002, "thread_id": 9},
+    #     10: {"chat_id": -1005000000002, "thread_id": 10},
+    # },
+    # -1004000000003: {
+    #     1: {"chat_id": -1005000000003, "thread_id": 1},
+    #     2: {"chat_id": -1005000000003, "thread_id": 2},
+    #     3: {"chat_id": -1005000000003, "thread_id": 3},
+    #     4: {"chat_id": -1005000000003, "thread_id": 4},
+    #     5: {"chat_id": -1005000000003, "thread_id": 5},
+    #     6: {"chat_id": -1005000000003, "thread_id": 6},
+    #     7: {"chat_id": -1005000000003, "thread_id": 7},
+    #     8: {"chat_id": -1005000000003, "thread_id": 8},
+    #     9: {"chat_id": -1005000000003, "thread_id": 9},
+    #     10: {"chat_id": -1005000000003, "thread_id": 10},
+    # },
+}
+
+# ========== ПРИВЯЗКА EXCEL К РАБОЧИМ ГРУППАМ ==========
+# Если группа не в словаре — используется "objects.xlsx" по умолчанию.
+EXCEL_MAP = {
+    -1003281117256: "dagestan.xlsx",  # Рабочая группа A
+    -1003237477689: "nazran.xlsx",    # Рабочая группа B
+}
 
 # ========== БАЗА ДАННЫХ ==========
 def init_db():
@@ -109,7 +184,7 @@ UPLOAD_STEPS = [
     "🔥 Шильдик котла (модель и мощность)",
     "📎 Дополнительные фото"
 ]
-MANDATORY_STEPS = set(UPLOAD_STEPS[:-1])
+MANDATORY_STEPS = set(UPLOAD_STEPS[:-1])  # все кроме "Дополнительные фото"
 
 # ========== КЛАВИАТУРЫ ==========
 def main_kb():
@@ -118,9 +193,9 @@ def main_kb():
         resize_keyboard=True
     )
 
-def step_kb(step_name, has_files=False, user_id=None):
+def step_kb(step_name, has_files=False, user_id: int | None = None):
     """Клавиатура шагов с привязкой к user_id"""
-    cancel_cb = f"cancel_{user_id}"
+    cancel_cb = f"cancel_{user_id}" if user_id else "cancel"
     if has_files:
         buttons = [[
             InlineKeyboardButton(text="💾 Сохранить", callback_data=f"save_{user_id}"),
@@ -142,9 +217,11 @@ def confirm_kb(prefix: str, user_id: int):
         InlineKeyboardButton(text="✅ Да", callback_data=f"{prefix}_confirm_yes_{user_id}"),
         InlineKeyboardButton(text="❌ Отмена", callback_data=f"{prefix}_confirm_no_{user_id}")
     ]])
-    # ========== ХЕЛПЕРЫ ==========
+
+# ========== ХЕЛПЕРЫ ==========
 def is_from_work_topic(msg: Message) -> bool:
-    return (msg.chat and msg.chat.id == WORK_CHAT_ID and getattr(msg, "is_topic_message", False))
+    # Любая тема в супергруппе считается рабочей — больше не завязано на фиксированный WORK_CHAT_ID
+    return bool(msg.chat and getattr(msg, "is_topic_message", False))
 
 async def safe_call(coro, pause=0.25):
     try:
@@ -155,20 +232,27 @@ async def safe_call(coro, pause=0.25):
         await asyncio.sleep(e.retry_after + 1)
         return await coro
 
-def check_object_excel(object_id):
+def get_excel_filename_for_chat(chat_id: int) -> str:
+    return EXCEL_MAP.get(chat_id, "objects.xlsx")
+
+def check_object_excel(chat_id: int, object_id: str):
+    """Проверка объекта в Excel, привязанном к группе chat_id"""
+    filename = get_excel_filename_for_chat(chat_id)
     try:
-        wb = openpyxl.load_workbook("objects.xlsx", read_only=True, data_only=True)
+        wb = openpyxl.load_workbook(filename, read_only=True, data_only=True)
         sh = wb.active
         for row in sh.iter_rows(min_row=2, values_only=True):
             if str(row[0]).strip() == str(object_id):
                 return True, str(row[1])
         return False, None
     except Exception as e:
-        return None, str(e)
+        return None, f"{filename}: {e}"
 
-def get_object_info(object_id):
+def get_object_info(chat_id: int, object_id: str):
+    """Получение информации об объекте из Excel, привязанного к группе chat_id"""
+    filename = get_excel_filename_for_chat(chat_id)
     try:
-        wb = openpyxl.load_workbook("objects.xlsx", read_only=True, data_only=True)
+        wb = openpyxl.load_workbook(filename, read_only=True, data_only=True)
         sh = wb.active
         for row in sh.iter_rows(min_row=2, values_only=True):
             if str(row[0]).strip() == str(object_id):
@@ -190,7 +274,7 @@ async def keepalive():
                 await s.get(WEBHOOK_URL)
         except:
             pass
-        await asyncio.sleep(240)
+        await asyncio.sleep(240)  # 4 минуты
 
 # ========== КОМАНДЫ ==========
 @router.message(Command("start"))
@@ -200,32 +284,44 @@ async def cmd_start(m: Message):
         "📸 /photo — новая загрузка\n"
         "📎 /addphoto — добавить фото\n"
         "ℹ️ /info — информация по объектам\n"
-        "⚙️ Работает только в рабочей теме.",
+        "⚙️ Работает только в рабочих темах (форум-темы).",
         reply_markup=main_kb()
     )
 
 @router.message(Command("photo"))
 async def cmd_photo(m: Message, state: FSMContext):
     if not is_from_work_topic(m):
-        await m.answer("📍 Эта команда работает только в рабочей группе/теме.")
+        await m.answer("📍 Эта команда работает только в рабочих темах (форум-темах).")
         return
     await state.set_state(Upload.waiting_object)
-    await state.update_data(owner_id=m.from_user.id)
+    await state.update_data(
+        owner_id=m.from_user.id,
+        work_chat_id=m.chat.id,
+        work_thread_id=getattr(m, "message_thread_id", None),
+    )
     await m.answer("📝 Введите номер объекта:")
 
 @router.message(Command("addphoto"))
 async def cmd_addphoto(m: Message, state: FSMContext):
     if not is_from_work_topic(m):
-        await m.answer("📍 Эта команда работает только в рабочей группе/теме.")
+        await m.answer("📍 Эта команда работает только в рабочих темах (форум-темах).")
         return
     await state.set_state(AddPhoto.waiting_object)
-    await state.update_data(owner_id=m.from_user.id)
+    await state.update_data(
+        owner_id=m.from_user.id,
+        work_chat_id=m.chat.id,
+        work_thread_id=getattr(m, "message_thread_id", None),
+    )
     await m.answer("📝 Введите номер объекта (для добавления файлов):")
 
 @router.message(Command("info"))
 async def cmd_info(m: Message, state: FSMContext):
     await state.set_state(Info.waiting_object)
-    await state.update_data(owner_id=m.from_user.id)
+    await state.update_data(
+        owner_id=m.from_user.id,
+        work_chat_id=m.chat.id,
+        work_thread_id=getattr(m, "message_thread_id", None),
+    )
     await m.answer("📝 Введите один или несколько номеров объектов (через запятую):")
 
 @router.message(Command("result"))
@@ -237,7 +333,7 @@ async def cmd_result(m: Message):
     lines = ["✅ Обработанные объекты (сценарий /photo):"]
     for oid, author, ts in rows:
         try:
-            ts_h = datetime.fromisoformat(ts).strftime("%d.%m.%Y %H:%M")
+            ts_h = datetime.fromisoformat(ts).strftime("%d.%m.%Y %H:%М")
         except:
             ts_h = ts
         lines.append(f"• #{oid} — {author} ({ts_h})")
@@ -247,14 +343,16 @@ async def cmd_result(m: Message):
 @router.message(Upload.waiting_object)
 async def check_upload_object(m: Message, state: FSMContext):
     obj = m.text.strip()
-    ok, name = check_object_excel(obj)
+    ok, name = check_object_excel(m.chat.id, obj)
     if ok:
         await state.update_data(
             object=obj,
             object_name=name,
             step=0,
             steps=[{"name": s, "files": []} for s in UPLOAD_STEPS],
-            owner_id=m.from_user.id
+            owner_id=m.from_user.id,
+            work_chat_id=m.chat.id,
+            work_thread_id=getattr(m, "message_thread_id", None),
         )
         await state.set_state(Upload.confirming)
         await m.answer(
@@ -265,15 +363,22 @@ async def check_upload_object(m: Message, state: FSMContext):
         await m.answer(f"❌ Объект {obj} не найден.")
         await state.clear()
     else:
-        await m.answer(f"❌ Ошибка чтения objects.xlsx: {name or 'неизвестно'}")
+        await m.answer(f"❌ Ошибка чтения: {name or 'неизвестно'}")
         await state.clear()
 
 @router.message(AddPhoto.waiting_object)
 async def check_add_object(m: Message, state: FSMContext):
     obj = m.text.strip()
-    ok, name = check_object_excel(obj)
+    ok, name = check_object_excel(m.chat.id, obj)
     if ok:
-        await state.update_data(object=obj, object_name=name, files=[], owner_id=m.from_user.id)
+        await state.update_data(
+            object=obj,
+            object_name=name,
+            files=[],
+            owner_id=m.from_user.id,
+            work_chat_id=m.chat.id,
+            work_thread_id=getattr(m, "message_thread_id", None),
+        )
         await state.set_state(AddPhoto.confirming)
         await m.answer(
             f"Подтвердите объект (добавление файлов):\n\n🆔 {obj}\n🏷️ {name}",
@@ -283,7 +388,7 @@ async def check_add_object(m: Message, state: FSMContext):
         await m.answer(f"❌ Объект {obj} не найден.")
         await state.clear()
     else:
-        await m.answer(f"❌ Ошибка чтения objects.xlsx: {name or 'неизвестно'}")
+        await m.answer(f"❌ Ошибка чтения: {name or 'неизвестно'}")
         await state.clear()
 
 # ===== Подтверждение: /photo =====
@@ -320,7 +425,8 @@ async def add_confirm_yes(c: CallbackQuery, state: FSMContext):
     )
     await state.update_data(last_msg=c.message.message_id)
     await c.answer("Подтверждено ✅")
-    # ====== ОТМЕНА (универсальная) ======
+
+# ====== ОТМЕНА (универсальная) ======
 @router.callback_query(F.data.startswith("cancel_"))
 async def cancel_anywhere(c: CallbackQuery, state: FSMContext):
     try:
@@ -379,9 +485,10 @@ async def cancel_confirm_add(c: CallbackQuery, state: FSMContext):
     except:
         pass
     await c.answer("Отменено ✅")
+
 # ========== ПРИЁМ ФАЙЛОВ ==========
 async def _finalize_media_group_for_photo(m: Message, state: FSMContext, group_id: str):
-    await asyncio.sleep(3.2)
+    await asyncio.sleep(3.2)  # дождаться всех сообщений альбома
     data = await state.get_data()
     step_i = data["step"]
     steps = data["steps"]
@@ -395,6 +502,7 @@ async def _finalize_media_group_for_photo(m: Message, state: FSMContext, group_i
 
     group = media_groups.pop(group_id, [])
     finalizing.discard(group_id)
+
     if group:
         cur["files"].extend(group)
 
@@ -433,13 +541,19 @@ async def handle_upload(m: Message, state: FSMContext):
         media_groups = data.get("media_groups", {})
         finalizing = set(data.get("finalizing_groups", []))
         gid = m.media_group_id
+
         media_groups.setdefault(gid, []).append(file_info)
-        start_finalize = gid not in finalizing
-        if start_finalize:
+
+        start_finalize = False
+        if gid not in finalizing:
             finalizing.add(gid)
+            start_finalize = True
+
         await state.update_data(media_groups=media_groups, finalizing_groups=list(finalizing))
+
         if start_finalize:
             asyncio.create_task(_finalize_media_group_for_photo(m, state, gid))
+        return
     else:
         cur["files"].append(file_info)
         last_msg_id = data.get("last_msg")
@@ -458,12 +572,16 @@ async def _finalize_media_group_for_add(m: Message, state: FSMContext, group_id:
     files = data.get("files", [])
     media_groups = data.get("media_groups", {})
     finalizing = set(data.get("finalizing_groups", []))
+
     if group_id not in finalizing:
         return
+
     group = media_groups.pop(group_id, [])
     finalizing.discard(group_id)
+
     if group:
         files.extend(group)
+
     last_msg_id = data.get("last_msg")
     if last_msg_id:
         try:
@@ -492,13 +610,19 @@ async def handle_addphoto_upload(m: Message, state: FSMContext):
         media_groups = data.get("media_groups", {})
         finalizing = set(data.get("finalizing_groups", []))
         gid = m.media_group_id
+
         media_groups.setdefault(gid, []).append(file_info)
-        start_finalize = gid not in finalizing
-        if start_finalize:
+
+        start_finalize = False
+        if gid not in finalizing:
             finalizing.add(gid)
+            start_finalize = True
+
         await state.update_data(media_groups=media_groups, finalizing_groups=list(finalizing))
+
         if start_finalize:
             asyncio.create_task(_finalize_media_group_for_add(m, state, gid))
+        return
     else:
         files.append(file_info)
         last_msg_id = data.get("last_msg")
@@ -534,7 +658,7 @@ async def step_save(c: CallbackQuery, state: FSMContext):
             all_steps = get_files(obj)
             all_files_flat = [f for ff in all_steps.values() for f in ff]
             if all_files_flat:
-                await post_archive_single_group(obj, obj_name, all_files_flat, author)
+                await post_archive_single_group(obj, obj_name, all_files_flat, author, data)
                 delete_files_by_object(obj)
         await state.clear()
         try:
@@ -567,7 +691,7 @@ async def step_save(c: CallbackQuery, state: FSMContext):
         all_steps = get_files(obj)
         all_files_flat = [f for ff in all_steps.values() for f in ff]
         if all_files_flat:
-            await post_archive_single_group(obj, obj_name, all_files_flat, author)
+            await post_archive_single_group(obj, obj_name, all_files_flat, author, data)
             delete_files_by_object(obj)
         mark_completed(obj, author)
         try:
@@ -596,7 +720,7 @@ async def step_skip(c: CallbackQuery, state: FSMContext):
         all_steps = get_files(obj)
         all_files_flat = [f for ff in all_steps.values() for f in ff]
         if all_files_flat:
-            await post_archive_single_group(obj, obj_name, all_files_flat, author)
+            await post_archive_single_group(obj, obj_name, all_files_flat, author, data)
             delete_files_by_object(obj)
         mark_completed(obj, author)
         try:
@@ -605,24 +729,26 @@ async def step_skip(c: CallbackQuery, state: FSMContext):
             pass
         await state.clear()
         await c.answer("Готово ✅")
-    else:
-        next_name = steps[step_i]["name"]
-        owner_id = data.get("owner_id")
-        try:
-            await c.message.edit_text(next_name, reply_markup=step_kb(next_name, user_id=owner_id))
-        except:
-            pass
-        await state.update_data(last_msg=c.message.message_id)
-        await c.answer("Пропущено ⏭️")
+        return
+
+    next_name = steps[step_i]["name"]
+    owner_id = data.get("owner_id")
+    try:
+        await c.message.edit_text(next_name, reply_markup=step_kb(next_name, user_id=owner_id))
+    except:
+        pass
+    await state.update_data(last_msg=c.message.message_id)
+    await c.answer("Пропущено ⏭️")
+
 # ========== INFO ==========
 @router.message(Info.waiting_object)
 async def info_object(m: Message, state: FSMContext):
     objs = [x.strip() for x in m.text.split(",") if x.strip()]
     responses = []
     for obj in objs:
-        info = get_object_info(obj)
+        info = get_object_info(m.chat.id, obj)
         if not info:
-            responses.append(f"❌ Объект {obj} не найден в файле objects.xlsx")
+            responses.append(f"❌ Объект {obj} не найден в Excel, привязанном к этой группе.")
         else:
             responses.append(
                 f"📋 Объект {info['id']}:\n"
@@ -633,9 +759,37 @@ async def info_object(m: Message, state: FSMContext):
     await m.answer("\n\n".join(responses))
     await state.clear()
 
-# ========== ОТПРАВКА В АРХИВ ==========
-async def post_archive_single_group(object_id: str, object_name: str, files: list, author: str):
+# ========== ОТПРАВКА В АРХИВ С УЧЁТОМ МАРШРУТИЗАЦИИ ==========
+async def post_archive_single_group(object_id: str, object_name: str, files: list, author: str, state_data: dict):
+    """
+    Отправка заголовка, медиа и документов в соответствующую архивную группу и тему.
+    Соответствие определяется по TOPIC_MAP[work_chat_id][work_thread_id].
+    """
     try:
+        work_chat_id = state_data.get("work_chat_id")
+        work_thread_id = state_data.get("work_thread_id")
+
+        mapping = TOPIC_MAP.get(work_chat_id, {}).get(work_thread_id)
+        if not mapping or not mapping.get("chat_id") or not mapping.get("thread_id"):
+            # Сообщим прямо в рабочую тему, что маршрут не настроен
+            try:
+                await safe_call(bot.send_message(
+                    chat_id=work_chat_id,
+                    text=(
+                        "⚠️ Не найдена архивная тема для отправки.\n\n"
+                        f"Источник: chat_id={work_chat_id}, thread_id={work_thread_id}\n"
+                        f"Объект #{object_id} «{object_name or ''}».\n"
+                        f"Добавьте соответствие в TOPIC_MAP и повторите."
+                    ),
+                    message_thread_id=work_thread_id
+                ))
+            except Exception as ee:
+                print(f"[archive warn] cannot notify source chat: {ee}")
+            return
+
+        archive_chat_id = mapping["chat_id"]
+        archive_thread_id = mapping["thread_id"]
+
         title = object_name or ""
         header = (
             f"💾 ОБЪЕКТ #{object_id}\n"
@@ -643,7 +797,14 @@ async def post_archive_single_group(object_id: str, object_name: str, files: lis
             f"👤 Исполнитель: {author}\n"
             f"🕒 {datetime.now().strftime('%d.%m.%Y %H:%M')}"
         )
-        await safe_call(bot.send_message(ARCHIVE_CHAT_ID, header))
+        # Заголовок
+        await safe_call(bot.send_message(
+            archive_chat_id,
+            header,
+            message_thread_id=archive_thread_id
+        ))
+
+        # Медиа альбомами по 10
         batch = []
         for f in files:
             if f["type"] == "photo":
@@ -653,12 +814,20 @@ async def post_archive_single_group(object_id: str, object_name: str, files: lis
             elif f["type"] == "document":
                 pass
             if len(batch) == 10:
-                await safe_call(bot.send_media_group(ARCHIVE_CHAT_ID, batch))
+                await safe_call(bot.send_media_group(
+                    archive_chat_id, batch, message_thread_id=archive_thread_id
+                ))
                 batch = []
         if batch:
-            await safe_call(bot.send_media_group(ARCHIVE_CHAT_ID, batch))
+            await safe_call(bot.send_media_group(
+                archive_chat_id, batch, message_thread_id=archive_thread_id
+            ))
+
+        # Документы по одному
         for d in [x for x in files if x["type"] == "document"]:
-            await safe_call(bot.send_document(ARCHIVE_CHAT_ID, d["file_id"]))
+            await safe_call(bot.send_document(
+                archive_chat_id, d["file_id"], message_thread_id=archive_thread_id
+            ))
     except Exception as e:
         print(f"[archive_single_group] Ошибка при отправке в архив: {e}")
 
