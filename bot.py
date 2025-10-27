@@ -31,15 +31,13 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
 
-# ========== МАРШРУТИЗАЦИЯ ТЕМ (WORK -> ARCHIVE) ==========
-# Формат:
-# TOPIC_MAP[work_chat_id][work_thread_id] = {"chat_id": archive_chat_id, "thread_id": archive_thread_id}
+# ========== МАРШРУТИЗАЦИЯ ТЕМ (WORK → ARCHIVE) ==========
 TOPIC_MAP = {
-    # ==== ТЕКУЩИЕ ЖИВЫЕ МАРШРУТЫ (2 рабочие группы → их архивы) ====
+    # ==== ТЕКУЩИЕ ЖИВЫЕ МАРШРУТЫ ====
     -1003281117256: {  # Рабочая группа A (dagestan.xlsx)
-        3: {"chat_id": -1003250982118, "thread_id": 3},  # из темы 3 → в тему 3
-        # ----- 8 заглушек тем на будущее (поставь реальные thread_id слева/справа) -----
-        # Пример: 101: {"chat_id": -1003250982118, "thread_id": 401},
+        3: {"chat_id": -1003250982118, "thread_id": 3},
+        # ----- 8 заглушек тем на будущее -----
+        # 101: {"chat_id": -1003250982118, "thread_id": 401},
         # 102: {"chat_id": -1003250982118, "thread_id": 402},
         # 103: {"chat_id": -1003250982118, "thread_id": 403},
         # 104: {"chat_id": -1003250982118, "thread_id": 404},
@@ -49,7 +47,7 @@ TOPIC_MAP = {
         # 108: {"chat_id": -1003250982118, "thread_id": 408},
     },
     -1003237477689: {  # Рабочая группа B (nazran.xlsx)
-        15: {"chat_id": -1003252316518, "thread_id": 6},  # из темы 15 → в тему 6
+        15: {"chat_id": -1003252316518, "thread_id": 6},
         # ----- 8 заглушек тем на будущее -----
         # 201: {"chat_id": -1003252316518, "thread_id": 501},
         # 202: {"chat_id": -1003252316518, "thread_id": 501},
@@ -61,51 +59,54 @@ TOPIC_MAP = {
         # 208: {"chat_id": -1003252316518, "thread_id": 504},
     },
 
-    # ====== ЗАГЛУШКИ: 3 будущих рабочие группы (по 10 тем каждая) ======
+    # ====== ЗАГЛУШКИ: 3 будущие рабочие группы (по 10 тем каждая) ======
     # Пример: замени CHAT_ID и THREAD_ID на реальные, когда создашь.
-    # -1004000000001: {
-    #     1: {"chat_id": -1005000000001, "thread_id": 1},
-    #     2: {"chat_id": -1005000000001, "thread_id": 2},
-    #     3: {"chat_id": -1005000000001, "thread_id": 3},
-    #     4: {"chat_id": -1005000000001, "thread_id": 4},
-    #     5: {"chat_id": -1005000000001, "thread_id": 5},
-    #     6: {"chat_id": -1005000000001, "thread_id": 6},
-    #     7: {"chat_id": -1005000000001, "thread_id": 7},
-    #     8: {"chat_id": -1005000000001, "thread_id": 8},
-    #     9: {"chat_id": -1005000000001, "thread_id": 9},
-    #     10: {"chat_id": -1005000000001, "thread_id": 10},
-    # },
-    # -1004000000002: {
-    #     1: {"chat_id": -1005000000002, "thread_id": 1},
-    #     2: {"chat_id": -1005000000002, "thread_id": 2},
-    #     3: {"chat_id": -1005000000002, "thread_id": 3},
-    #     4: {"chat_id": -1005000000002, "thread_id": 4},
-    #     5: {"chat_id": -1005000000002, "thread_id": 5},
-    #     6: {"chat_id": -1005000000002, "thread_id": 6},
-    #     7: {"chat_id": -1005000000002, "thread_id": 7},
-    #     8: {"chat_id": -1005000000002, "thread_id": 8},
-    #     9: {"chat_id": -1005000000002, "thread_id": 9},
-    #     10: {"chat_id": -1005000000002, "thread_id": 10},
-    # },
-    # -1004000000003: {
-    #     1: {"chat_id": -1005000000003, "thread_id": 1},
-    #     2: {"chat_id": -1005000000003, "thread_id": 2},
-    #     3: {"chat_id": -1005000000003, "thread_id": 3},
-    #     4: {"chat_id": -1005000000003, "thread_id": 4},
-    #     5: {"chat_id": -1005000000003, "thread_id": 5},
-    #     6: {"chat_id": -1005000000003, "thread_id": 6},
-    #     7: {"chat_id": -1005000000003, "thread_id": 7},
-    #     8: {"chat_id": -1005000000003, "thread_id": 8},
-    #     9: {"chat_id": -1005000000003, "thread_id": 9},
-    #     10: {"chat_id": -1005000000003, "thread_id": 10},
-    # },
+    -1004000000001: {
+        1: {"chat_id": -1005000000001, "thread_id": 1},
+        2: {"chat_id": -1005000000001, "thread_id": 2},
+        3: {"chat_id": -1005000000001, "thread_id": 3},
+        4: {"chat_id": -1005000000001, "thread_id": 4},
+        5: {"chat_id": -1005000000001, "thread_id": 5},
+        6: {"chat_id": -1005000000001, "thread_id": 6},
+        7: {"chat_id": -1005000000001, "thread_id": 7},
+        8: {"chat_id": -1005000000001, "thread_id": 8},
+        9: {"chat_id": -1005000000001, "thread_id": 9},
+        10: {"chat_id": -1005000000001, "thread_id": 10},
+    },
+    -1004000000002: {
+        1: {"chat_id": -1005000000002, "thread_id": 1},
+        2: {"chat_id": -1005000000002, "thread_id": 2},
+        3: {"chat_id": -1005000000002, "thread_id": 3},
+        4: {"chat_id": -1005000000002, "thread_id": 4},
+        5: {"chat_id": -1005000000002, "thread_id": 5},
+        6: {"chat_id": -1005000000002, "thread_id": 6},
+        7: {"chat_id": -1005000000002, "thread_id": 7},
+        8: {"chat_id": -1005000000002, "thread_id": 8},
+        9: {"chat_id": -1005000000002, "thread_id": 9},
+        10: {"chat_id": -1005000000002, "thread_id": 10},
+    },
+    -1004000000003: {
+        1: {"chat_id": -1005000000003, "thread_id": 1},
+        2: {"chat_id": -1005000000003, "thread_id": 2},
+        3: {"chat_id": -1005000000003, "thread_id": 3},
+        4: {"chat_id": -1005000000003, "thread_id": 4},
+        5: {"chat_id": -1005000000003, "thread_id": 5},
+        6: {"chat_id": -1005000000003, "thread_id": 6},
+        7: {"chat_id": -1005000000003, "thread_id": 7},
+        8: {"chat_id": -1005000000003, "thread_id": 8},
+        9: {"chat_id": -1005000000003, "thread_id": 9},
+        10: {"chat_id": -1005000000003, "thread_id": 10},
+    },
 }
 
 # ========== ПРИВЯЗКА EXCEL К РАБОЧИМ ГРУППАМ ==========
-# Если группа не в словаре — используется "objects.xlsx" по умолчанию.
 EXCEL_MAP = {
-    -1003281117256: "dagestan.xlsx",  # Рабочая группа A
-    -1003237477689: "nazran.xlsx",    # Рабочая группа B
+    -1003281117256: "dagestan.xlsx",
+    -1003237477689: "nazran.xlsx",
+    # Будущие рабочие группы
+    -1004000000001: "bryunsk.xlsx",
+    -1004000000002: "orel.xlsx",
+    -1004000000003: "objects.xlsx",
 }
 
 # ========== БАЗА ДАННЫХ ==========
@@ -219,25 +220,15 @@ def confirm_kb(prefix: str, user_id: int):
     ]])
 
 # ========== ХЕЛПЕРЫ ==========
-def is_from_work_topic(msg: Message) -> bool:
-    # Любая тема в супергруппе считается рабочей — больше не завязано на фиксированный WORK_CHAT_ID
-    return bool(msg.chat and getattr(msg, "is_topic_message", False))
-
-async def safe_call(coro, pause=0.25):
-    try:
-        res = await coro
-        await asyncio.sleep(pause)
-        return res
-    except TelegramRetryAfter as e:
-        await asyncio.sleep(e.retry_after + 1)
-        return await coro
-
-def get_excel_filename_for_chat(chat_id: int) -> str:
-    return EXCEL_MAP.get(chat_id, "objects.xlsx")
+def get_excel_filename_for_chat(chat_id: int) -> str | None:
+    """Возвращает имя Excel-файла, если привязан. Иначе None."""
+    return EXCEL_MAP.get(chat_id)
 
 def check_object_excel(chat_id: int, object_id: str):
     """Проверка объекта в Excel, привязанном к группе chat_id"""
     filename = get_excel_filename_for_chat(chat_id)
+    if not filename:
+        return None, "⚠️ К этой группе не привязан Excel-документ. Обратитесь к администратору."
     try:
         wb = openpyxl.load_workbook(filename, read_only=True, data_only=True)
         sh = wb.active
@@ -251,6 +242,8 @@ def check_object_excel(chat_id: int, object_id: str):
 def get_object_info(chat_id: int, object_id: str):
     """Получение информации об объекте из Excel, привязанного к группе chat_id"""
     filename = get_excel_filename_for_chat(chat_id)
+    if not filename:
+        return {"error": "⚠️ К этой группе не привязан Excel-документ. Обратитесь к администратору."}
     try:
         wb = openpyxl.load_workbook(filename, read_only=True, data_only=True)
         sh = wb.active
@@ -263,9 +256,8 @@ def get_object_info(chat_id: int, object_id: str):
                     "address": str(row[3]) if len(row) > 3 else "Н/Д",
                 }
         return None
-    except:
-        return None
-
+    except Exception as e:
+        return {"error": f"{filename}: {e}"}
 # ========== KEEPALIVE ==========
 async def keepalive():
     while True:
@@ -290,8 +282,8 @@ async def cmd_start(m: Message):
 
 @router.message(Command("photo"))
 async def cmd_photo(m: Message, state: FSMContext):
-    if not is_from_work_topic(m):
-        await m.answer("📍 Эта команда работает только в рабочих темах (форум-темах).")
+    if not get_excel_filename_for_chat(m.chat.id):
+        await m.answer("⚠️ К этой группе не привязан Excel-документ. Обратитесь к администратору.")
         return
     await state.set_state(Upload.waiting_object)
     await state.update_data(
@@ -303,8 +295,8 @@ async def cmd_photo(m: Message, state: FSMContext):
 
 @router.message(Command("addphoto"))
 async def cmd_addphoto(m: Message, state: FSMContext):
-    if not is_from_work_topic(m):
-        await m.answer("📍 Эта команда работает только в рабочих темах (форум-темах).")
+    if not get_excel_filename_for_chat(m.chat.id):
+        await m.answer("⚠️ К этой группе не привязан Excel-документ. Обратитесь к администратору.")
         return
     await state.set_state(AddPhoto.waiting_object)
     await state.update_data(
@@ -316,6 +308,9 @@ async def cmd_addphoto(m: Message, state: FSMContext):
 
 @router.message(Command("info"))
 async def cmd_info(m: Message, state: FSMContext):
+    if not get_excel_filename_for_chat(m.chat.id):
+        await m.answer("⚠️ К этой группе не привязан Excel-документ. Обратитесь к администратору.")
+        return
     await state.set_state(Info.waiting_object)
     await state.update_data(
         owner_id=m.from_user.id,
@@ -749,6 +744,8 @@ async def info_object(m: Message, state: FSMContext):
         info = get_object_info(m.chat.id, obj)
         if not info:
             responses.append(f"❌ Объект {obj} не найден в Excel, привязанном к этой группе.")
+        elif "error" in info:
+            responses.append(info["error"])
         else:
             responses.append(
                 f"📋 Объект {info['id']}:\n"
@@ -868,3 +865,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
