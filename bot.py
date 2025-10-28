@@ -36,38 +36,13 @@ router = Router()
 ADMIN_IDS = {7277619113}  # Mr. X
 
 # ========== МАРШРУТИЗАЦИЯ ТЕМ (WORK → ARCHIVE) ==========
-# Формат:
-# TOPIC_MAP[work_chat_id][work_thread_id] = {"chat_id": archive_chat_id, "thread_id": archive_thread_id}
-# ВНИМАНИЕ: при сохранении в JSON ключи становятся строками — ниже в коде есть нормализация доступа.
 TOPIC_MAP = {
-    # ==== ТЕКУЩИЕ ЖИВЫЕ МАРШРУТЫ ====
     -1003281117256: {  # Рабочая группа A (dagestan.xlsx)
         3: {"chat_id": -1003250982118, "thread_id": 3},
-        # ----- 8 заглушек тем на будущее -----
-        # 101: {"chat_id": -1003250982118, "thread_id": 401},
-        # 102: {"chat_id": -1003250982118, "thread_id": 402},
-        # 103: {"chat_id": -1003250982118, "thread_id": 403},
-        # 104: {"chat_id": -1003250982118, "thread_id": 404},
-        # 105: {"chat_id": -1003250982118, "thread_id": 405},
-        # 106: {"chat_id": -1003250982118, "thread_id": 406},
-        # 107: {"chat_id": -1003250982118, "thread_id": 407},
-        # 108: {"chat_id": -1003250982118, "thread_id": 408},
     },
     -1003237477689: {  # Рабочая группа B (nazran.xlsx)
         15: {"chat_id": -1003252316518, "thread_id": 6},
-        # ----- 8 заглушек тем на будущее -----
-        # 201: {"chat_id": -1003252316518, "thread_id": 501},
-        # 202: {"chat_id": -1003252316518, "thread_id": 501},
-        # 203: {"chat_id": -1003252316518, "thread_id": 502},
-        # 204: {"chat_id": -1003252316518, "thread_id": 502},
-        # 205: {"chat_id": -1003252316518, "thread_id": 503},
-        # 206: {"chat_id": -1003252316518, "thread_id": 503},
-        # 207: {"chat_id": -1003252316518, "thread_id": 504},
-        # 208: {"chat_id": -1003252316518, "thread_id": 504},
     },
-
-    # ====== ЗАГЛУШКИ: 3 будущие рабочие группы (по 10 тем каждая) ======
-    # Пример: замени CHAT_ID и THREAD_ID на реальные, когда создашь.
     -1004000000001: {
         1: {"chat_id": -1005000000001, "thread_id": 1},
         2: {"chat_id": -1005000000001, "thread_id": 2},
@@ -107,15 +82,28 @@ TOPIC_MAP = {
 }
 
 # ========== ПРИВЯЗКА EXCEL К РАБОЧИМ ГРУППАМ ==========
-# Если группа не в словаре — бот предупредит, что к группе не привязан Excel-документ.
 EXCEL_MAP = {
     -1003281117256: "dagestan.xlsx",
     -1003237477689: "nazran.xlsx",
-    # Будущие рабочие группы — сразу с файлами-заглушками:
     -1004000000001: "bryunsk.xlsx",
     -1004000000002: "orel.xlsx",
     -1004000000003: "objects.xlsx",
 }
+
+# ========== КОНСТАНТЫ ==========
+UPLOAD_STEPS = [
+    "📸 Общий вид газопровода до и после счётчика",
+    "🧾 Старый счётчик — общий и крупный план (заводской номер, год, показания)",
+    "🔒 Фото пломбы на фоне маркировки счётчика",
+    "➡️ Стрелка направления газа на старом счётчике",
+    "🧱 Газопровод после монтажа нового счётчика",
+    "🆕 Новый счётчик — общий и крупный план (заводской номер, год, показания)",
+    "➡️ Стрелка направления нового счётчика",
+    "🎥 Видео герметичности соединений",
+    "🔥 Шильдик котла (модель и мощность)",
+    "📎 Дополнительные фото"
+]
+MANDATORY_STEPS = set(UPLOAD_STEPS[:-1])  # все кроме "Дополнительные фото"
 
 # ========== БАЗА ДАННЫХ ==========
 def init_db():
@@ -182,6 +170,15 @@ def list_completed():
         return cur.fetchall()
 
 # ========== ЗАГРУЗКА/СОХРАНЕНИЕ НАСТРОЕК ==========
+def stringify_keys(d):
+    """Рекурсивно преобразует ключи словаря в строки"""
+    if isinstance(d, dict):
+        return {str(k): stringify_keys(v) for k, v in d.items()}
+    elif isinstance(d, list):
+        return [stringify_keys(x) for x in d]
+    else:
+        return d
+
 def load_settings():
     global TOPIC_MAP, EXCEL_MAP
     try:
@@ -196,15 +193,6 @@ def load_settings():
         print(f"⚠️ Ошибка загрузки настроек: {e}")
 
 def save_settings():
-    # Всегда сериализуем с ключами-строками (для единообразия)
-    def stringify_keys(d):
-        if isinstance(d, dict):
-            return {str(k): stringify_keys(v) for k, v in d.items()}
-        elif isinstance(d, list):
-            return [stringify_keys(x) for x in d]
-        else:
-            return d
-
     db_set("TOPIC_MAP", json.dumps(stringify_keys(TOPIC_MAP), ensure_ascii=False))
     db_set("EXCEL_MAP", json.dumps(stringify_keys(EXCEL_MAP), ensure_ascii=False))
 
@@ -229,21 +217,6 @@ class AdminState(StatesGroup):
     waiting_excel = State()
     waiting_excel_del = State()
 
-# ========== КОНСТАНТЫ ==========
-UPLOAD_STEPS = [
-    "📸 Общий вид газопровода до и после счётчика",
-    "🧾 Старый счётчик — общий и крупный план (заводской номер, год, показания)",
-    "🔒 Фото пломбы на фоне маркировки счётчика",
-    "➡️ Стрелка направления газа на старом счётчике",
-    "🧱 Газопровод после монтажа нового счётчика",
-    "🆕 Новый счётчик — общий и крупный план (заводской номер, год, показания)",
-    "➡️ Стрелка направления нового счётчика",
-    "🎥 Видео герметичности соединений",
-    "🔥 Шильдик котла (модель и мощность)",
-    "📎 Дополнительные фото"
-]
-MANDATORY_STEPS = set(UPLOAD_STEPS[:-1])  # все кроме "Дополнительные фото"
-
 # ========== КЛАВИАТУРЫ ==========
 def admin_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -256,8 +229,12 @@ def admin_kb():
     ])
 
 def main_kb():
+    """Главная клавиатура с измененным порядком кнопок"""
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="/photo"), KeyboardButton(text="/addphoto"), KeyboardButton(text="/info")]],
+        keyboard=[
+            [KeyboardButton(text="/addphoto"), KeyboardButton(text="/info")],
+            [KeyboardButton(text="/photo")]
+        ],
         resize_keyboard=True
     )
 
@@ -291,16 +268,14 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
 def get_excel_filename_for_chat(chat_id: int) -> str | None:
-    # Учитываем, что ключи могли быть сохранены как строки в JSON
-    return (EXCEL_MAP.get(chat_id)
-            or EXCEL_MAP.get(str(chat_id)))
+    """Получает имя Excel файла для чата с учетом строковых ключей"""
+    return (EXCEL_MAP.get(chat_id) or EXCEL_MAP.get(str(chat_id)))
 
 def mapping_lookup(work_chat_id: int | str, work_thread_id: int | str):
     """
     Возвращает словарь {"chat_id": ..., "thread_id": ...} для маршрута,
     учитывая, что ключи могли быть сериализованы в строки.
     """
-    # прямой доступ
     sub = TOPIC_MAP.get(work_chat_id) or TOPIC_MAP.get(str(work_chat_id))
     if not sub:
         return None
@@ -343,6 +318,7 @@ def get_object_info(chat_id: int, object_id: str):
         return {"error": f"{filename}: {e}"}
 
 async def safe_call(coro, pause=0.25):
+    """Безопасный вызов с обработкой ограничений Telegram"""
     try:
         res = await coro
         await asyncio.sleep(pause)
@@ -353,6 +329,7 @@ async def safe_call(coro, pause=0.25):
 
 # ========== KEEPALIVE ==========
 async def keepalive():
+    """Периодические запросы для поддержания активности"""
     while True:
         try:
             async with aiohttp.ClientSession() as s:
@@ -412,7 +389,6 @@ async def add_route_process(m: Message, state: FSMContext):
         return
     try:
         wc, wt, ac, at = m.text.strip().split()
-        # храним ключи как строки — так безопаснее для JSON
         wc_s, wt_s = str(int(wc)), str(int(wt))
         ac_i, at_i = int(ac), int(at)
         TOPIC_MAP.setdefault(wc_s, {})[wt_s] = {"chat_id": ac_i, "thread_id": at_i}
@@ -537,25 +513,12 @@ async def del_excel_process(m: Message, state: FSMContext):
 async def cmd_start(m: Message):
     await m.answer(
         "👋 Привет! Это бот для загрузки фото по объектам счётчиков газа.\n\n"
-        "📸 /photo — новая загрузка\n"
         "📎 /addphoto — добавить фото\n"
         "ℹ️ /info — информация по объектам\n"
+        "📸 /photo — новая загрузка\n"
         "⚙️ Работает в темах форумов (супергруппы).",
-        reply_markup=main_kb()
+        reply_markup=main_kb()  # Используем обновленную клавиатуру
     )
-
-@router.message(Command("photo"))
-async def cmd_photo(m: Message, state: FSMContext):
-    if not get_excel_filename_for_chat(m.chat.id):
-        await m.answer("⚠️ К этой группе не привязан Excel-документ. Обратитесь к администратору.")
-        return
-    await state.set_state(Upload.waiting_object)
-    await state.update_data(
-        owner_id=m.from_user.id,
-        work_chat_id=m.chat.id,
-        work_thread_id=getattr(m, "message_thread_id", None),
-    )
-    await m.answer("📝 Введите номер объекта:")
 
 @router.message(Command("addphoto"))
 async def cmd_addphoto(m: Message, state: FSMContext):
@@ -582,6 +545,19 @@ async def cmd_info(m: Message, state: FSMContext):
         work_thread_id=getattr(m, "message_thread_id", None),
     )
     await m.answer("📝 Введите один или несколько номеров объектов (через запятую):")
+
+@router.message(Command("photo"))
+async def cmd_photo(m: Message, state: FSMContext):
+    if not get_excel_filename_for_chat(m.chat.id):
+        await m.answer("⚠️ К этой группе не привязан Excel-документ. Обратитесь к администратору.")
+        return
+    await state.set_state(Upload.waiting_object)
+    await state.update_data(
+        owner_id=m.from_user.id,
+        work_chat_id=m.chat.id,
+        work_thread_id=getattr(m, "message_thread_id", None),
+    )
+    await m.answer("📝 Введите номер объекта:")
 
 @router.message(Command("result"))
 async def cmd_result(m: Message):
@@ -756,370 +732,274 @@ async def _finalize_media_group_for_photo(m: Message, state: FSMContext, group_i
     media_groups = data.get("media_groups", {})
     finalizing = set(data.get("finalizing_groups", []))
 
-    if group_id not in finalizing:
+    if group_id not in media_groups:
         return
 
-    group = media_groups.pop(group_id, [])
+    if group_id in finalizing:
+        return
+
+    finalizing.add(group_id)
+    await state.update_data(finalizing_groups=list(finalizing))
+
+    files = media_groups[group_id]
+    cur["files"].extend(files)
+
+    await state.update_data(steps=steps, media_groups=media_groups)
+
     finalizing.discard(group_id)
+    await state.update_data(finalizing_groups=list(finalizing))
 
-    if group:
-        cur["files"].extend(group)
-
-    last_msg_id = data.get("last_msg")
-    if last_msg_id:
-        try:
-            await m.bot.delete_message(chat_id=m.chat.id, message_id=last_msg_id)
-        except:
-            pass
-    owner_id = data.get("owner_id")
-    msg = await m.answer("Выберите действие", reply_markup=step_kb(cur["name"], has_files=True, user_id=owner_id))
-    await state.update_data(
-        steps=steps,
-        last_msg=msg.message_id,
-        media_groups=media_groups,
-        finalizing_groups=list(finalizing)
-    )
-
-@router.message(Upload.uploading, F.photo | F.video | F.document)
-async def handle_upload(m: Message, state: FSMContext):
-    data = await state.get_data()
-    step_i = data["step"]
-    steps = data["steps"]
-    cur = steps[step_i]
-
-    if m.photo:
-        file_info = {"type": "photo", "file_id": m.photo[-1].file_id}
-    elif m.video:
-        file_info = {"type": "video", "file_id": m.video.file_id}
-    elif m.document:
-        file_info = {"type": "document", "file_id": m.document.file_id}
-    else:
-        return
-
-    if m.media_group_id:
-        media_groups = data.get("media_groups", {})
-        finalizing = set(data.get("finalizing_groups", []))
-        gid = m.media_group_id
-
-        media_groups.setdefault(gid, []).append(file_info)
-
-        start_finalize = False
-        if gid not in finalizing:
-            finalizing.add(gid)
-            start_finalize = True
-
-        await state.update_data(media_groups=media_groups, finalizing_groups=list(finalizing))
-
-        if start_finalize:
-            asyncio.create_task(_finalize_media_group_for_photo(m, state, gid))
-        return
-    else:
-        cur["files"].append(file_info)
-        last_msg_id = data.get("last_msg")
-        if last_msg_id:
-            try:
-                await m.bot.delete_message(chat_id=m.chat.id, message_id=last_msg_id)
-            except:
-                pass
-        owner_id = data.get("owner_id")
-        msg = await m.answer("Выберите действие", reply_markup=step_kb(cur["name"], has_files=True, user_id=owner_id))
-        await state.update_data(steps=steps, last_msg=msg.message_id)
-
-async def _finalize_media_group_for_add(m: Message, state: FSMContext, group_id: str):
+async def _finalize_media_group_for_addphoto(m: Message, state: FSMContext, group_id: str):
     await asyncio.sleep(3.2)
     data = await state.get_data()
     files = data.get("files", [])
+
     media_groups = data.get("media_groups", {})
     finalizing = set(data.get("finalizing_groups", []))
 
-    if group_id not in finalizing:
+    if group_id not in media_groups:
         return
 
-    group = media_groups.pop(group_id, [])
+    if group_id in finalizing:
+        return
+
+    finalizing.add(group_id)
+    await state.update_data(finalizing_groups=list(finalizing))
+
+    files.extend(media_groups[group_id])
+    await state.update_data(files=files, media_groups=media_groups)
+
     finalizing.discard(group_id)
+    await state.update_data(finalizing_groups=list(finalizing))
 
-    if group:
-        files.extend(group)
-
-    last_msg_id = data.get("last_msg")
-    if last_msg_id:
-        try:
-            await m.bot.delete_message(chat_id=m.chat.id, message_id=last_msg_id)
-        except:
-            pass
-    owner_id = data.get("owner_id")
-    msg = await m.answer("Выберите действие", reply_markup=step_kb('', has_files=True, user_id=owner_id))
-    await state.update_data(files=files, last_msg=msg.message_id, media_groups=media_groups, finalizing_groups=list(finalizing))
-
-@router.message(AddPhoto.uploading, F.photo | F.video | F.document)
-async def handle_addphoto_upload(m: Message, state: FSMContext):
+async def _handle_media_group(m: Message, state: FSMContext, group_id: str, handler):
     data = await state.get_data()
-    files = data.get("files", [])
+    media_groups = data.get("media_groups", {})
+    if group_id not in media_groups:
+        media_groups[group_id] = []
+    media_groups[group_id].append({
+        "type": "photo" if m.photo else "video" if m.video else "document",
+        "file_id": m.photo[-1].file_id if m.photo else m.video.file_id if m.video else m.document.file_id,
+    })
+    await state.update_data(media_groups=media_groups)
+    asyncio.create_task(handler(m, state, group_id))
 
-    if m.photo:
-        file_info = {"type": "photo", "file_id": m.photo[-1].file_id}
-    elif m.video:
-        file_info = {"type": "video", "file_id": m.video.file_id}
-    elif m.document:
-        file_info = {"type": "document", "file_id": m.document.file_id}
-    else:
-        return
+@router.message(Upload.uploading, F.media_group_id)
+async def album_uploading(m: Message, state: FSMContext):
+    await _handle_media_group(m, state, m.media_group_id, _finalize_media_group_for_photo)
 
-    if m.media_group_id:
-        media_groups = data.get("media_groups", {})
-        finalizing = set(data.get("finalizing_groups", []))
-        gid = m.media_group_id
+@router.message(AddPhoto.uploading, F.media_group_id)
+async def album_addphoto(m: Message, state: FSMContext):
+    await _handle_media_group(m, state, m.media_group_id, _finalize_media_group_for_addphoto)
 
-        media_groups.setdefault(gid, []).append(file_info)
-
-        start_finalize = False
-        if gid not in finalizing:
-            finalizing.add(gid)
-            start_finalize = True
-
-        await state.update_data(media_groups=media_groups, finalizing_groups=list(finalizing))
-
-        if start_finalize:
-            asyncio.create_task(_finalize_media_group_for_add(m, state, gid))
-        return
-    else:
-        files.append(file_info)
-        last_msg_id = data.get("last_msg")
-        if last_msg_id:
-            try:
-                await m.bot.delete_message(chat_id=m.chat.id, message_id=last_msg_id)
-            except:
-                pass
-        owner_id = data.get("owner_id")
-        msg = await m.answer("Выберите действие", reply_markup=step_kb('', has_files=True, user_id=owner_id))
-        await state.update_data(files=files, last_msg=msg.message_id)
-
-# ========== CALLBACKS ==========
-@router.callback_query(F.data.startswith("save_"))
-async def step_save(c: CallbackQuery, state: FSMContext):
-    user_id = int(c.data.split("_")[-1])
-    if c.from_user.id != user_id:
-        await c.answer("Эта кнопка не для вас 😅", show_alert=True)
-        return
-
-    current_state = await state.get_state()
+@router.message(Upload.uploading, (F.photo | F.video | F.document) & ~F.media_group_id)
+async def single_file_uploading(m: Message, state: FSMContext):
     data = await state.get_data()
-    author = c.from_user.full_name or c.from_user.username or str(c.from_user.id)
-    owner_id = data.get("owner_id")
-
-    # === /addphoto ===
-    if current_state == AddPhoto.uploading.state:
-        obj = data["object"]
-        obj_name = data.get("object_name") or ""
-        files = data.get("files", [])
-        if files:
-            save_files(obj, "📎 Дополнительные фото", files, author)
-            all_steps = get_files(obj)
-            all_files_flat = [f for ff in all_steps.values() for f in ff]
-            if all_files_flat:
-                await post_archive_single_group(obj, obj_name, all_files_flat, author, data)
-                delete_files_by_object(obj)
-        await state.clear()
-        try:
-            await c.message.edit_text(f"✅ Файлы по объекту {obj} отправлены в архив.")
-        except:
-            pass
-        await c.answer("Сохранено ✅")
-        return
-
-    # === /photo ===
-    obj = data["object"]
-    obj_name = data.get("object_name") or ""
     step_i = data["step"]
     steps = data["steps"]
     cur = steps[step_i]
-    if cur["files"]:
-        save_files(obj, cur["name"], cur["files"], author)
-    step_i += 1
-    await state.update_data(step=step_i, steps=steps)
+    file_type = "photo" if m.photo else "video" if m.video else "document"
+    file_id = m.photo[-1].file_id if m.photo else m.video.file_id if m.video else m.document.file_id
+    cur["files"].append({"type": file_type, "file_id": file_id})
+    await state.update_data(steps=steps)
+    await m.answer("✅ Файл принят.")
 
-    if step_i < len(steps):
-        next_name = steps[step_i]["name"]
-        try:
-            await c.message.edit_text(next_name, reply_markup=step_kb(next_name, user_id=owner_id))
-        except:
-            pass
-        await state.update_data(last_msg=c.message.message_id)
-        await c.answer("Сохранено ✅")
-    else:
-        all_steps = get_files(obj)
-        all_files_flat = [f for ff in all_steps.values() for f in ff]
-        if all_files_flat:
-            await post_archive_single_group(obj, obj_name, all_files_flat, author, data)
-            delete_files_by_object(obj)
-        mark_completed(obj, author)
-        try:
-            await c.message.edit_text(f"✅ Загрузка завершена для объекта {obj}. Файлы отправлены в архив.")
-        except:
-            pass
-        await state.clear()
-        await c.answer("Готово ✅")
+@router.message(AddPhoto.uploading, (F.photo | F.video | F.document) & ~F.media_group_id)
+async def single_file_addphoto(m: Message, state: FSMContext):
+    data = await state.get_data()
+    files = data.get("files", [])
+    file_type = "photo" if m.photo else "video" if m.video else "document"
+    file_id = m.photo[-1].file_id if m.photo else m.video.file_id if m.video else m.document.file_id
+    files.append({"type": file_type, "file_id": file_id})
+    await state.update_data(files=files)
+    await m.answer("✅ Файл принят.")
 
-@router.callback_query(F.data.startswith("skip_"))
-async def step_skip(c: CallbackQuery, state: FSMContext):
-    user_id = int(c.data.split("_")[-1])
+# ========== СОХРАНЕНИЕ ШАГА /photo ==========
+@router.callback_query(F.data.startswith("save_"))
+async def save_step(c: CallbackQuery, state: FSMContext):
+    try:
+        user_id = int(c.data.split("_")[1])
+    except:
+        await c.answer("Эта кнопка не для вас 😅", show_alert=True)
+        return
+
     if c.from_user.id != user_id:
         await c.answer("Эта кнопка не для вас 😅", show_alert=True)
         return
 
     data = await state.get_data()
-    obj = data["object"]
-    obj_name = data.get("object_name") or ""
-    author = c.from_user.full_name or c.from_user.username or str(c.from_user.id)
-    step_i = data["step"] + 1
+    step_i = data["step"]
     steps = data["steps"]
+    cur = steps[step_i]
+    if not cur["files"]:
+        await c.answer("❌ Нет файлов для сохранения.", show_alert=True)
+        return
+
+    step_i += 1
     await state.update_data(step=step_i)
 
     if step_i >= len(steps):
-        all_steps = get_files(obj)
-        all_files_flat = [f for ff in all_steps.values() for f in ff]
-        if all_files_flat:
-            await post_archive_single_group(obj, obj_name, all_files_flat, author, data)
-            delete_files_by_object(obj)
-        mark_completed(obj, author)
-        try:
-            await c.message.edit_text(f"✅ Загрузка завершена для объекта {obj}. Файлы отправлены в архив.")
-        except:
-            pass
-        await state.clear()
-        await c.answer("Готово ✅")
+        await _finalize_photo(c, state)
         return
 
-    next_name = steps[step_i]["name"]
+    next_step = steps[step_i]["name"]
     owner_id = data.get("owner_id")
-    try:
-        await c.message.edit_text(next_name, reply_markup=step_kb(next_name, user_id=owner_id))
-    except:
-        pass
-    await state.update_data(last_msg=c.message.message_id)
-    await c.answer("Пропущено ⏭️")
+    await c.message.edit_text(next_step, reply_markup=step_kb(next_step, user_id=owner_id))
+    await c.answer("✅ Сохранено")
 
-# ========== INFO ==========
-@router.message(Info.waiting_object)
-async def info_object(m: Message, state: FSMContext):
-    objs = [x.strip() for x in m.text.split(",") if x.strip()]
-    responses = []
-    for obj in objs:
-        info = get_object_info(m.chat.id, obj)
-        if not info:
-            responses.append(f"❌ Объект {obj} не найден в Excel, привязанном к этой группе.")
-        elif "error" in info:
-            responses.append(info["error"])
-        else:
-            responses.append(
-                f"📋 Объект {info['id']}:\n"
-                f"🏢 Потребитель: {info['consumer']}\n"
-                f"📍 Объект: {info['object']}\n"
-                f"🗺 Адрес: {info['address']}\n"
-            )
-    await m.answer("\n\n".join(responses))
+# ========== ПРОПУСК ШАГА /photo ==========
+@router.callback_query(F.data.startswith("skip_"))
+async def skip_step(c: CallbackQuery, state: FSMContext):
+    try:
+        user_id = int(c.data.split("_")[1])
+    except:
+        await c.answer("Эта кнопка не для вас 😅", show_alert=True)
+        return
+
+    if c.from_user.id != user_id:
+        await c.answer("Эта кнопка не для вас 😅", show_alert=True)
+        return
+
+    data = await state.get_data()
+    step_i = data["step"]
+    step_name = data["steps"][step_i]["name"]
+    if step_name in MANDATORY_STEPS:
+        await c.answer("❌ Этот шаг обязателен, пропуск невозможен.", show_alert=True)
+        return
+
+    step_i += 1
+    await state.update_data(step=step_i)
+    steps = data["steps"]
+
+    if step_i >= len(steps):
+        await _finalize_photo(c, state)
+        return
+
+    next_step = steps[step_i]["name"]
+    owner_id = data.get("owner_id")
+    await c.message.edit_text(next_step, reply_markup=step_kb(next_step, user_id=owner_id))
+    await c.answer("⏭️ Пропущено")
+
+# ========== ФИНАЛИЗАЦИЯ /photo ==========
+async def _finalize_photo(c: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    obj = data["object"]
+    obj_name = data["object_name"]
+    steps = data["steps"]
+    work_chat_id = data["work_chat_id"]
+    work_thread_id = data["work_thread_id"]
+    owner_id = data["owner_id"]
+
+    # Сохраняем в БД
+    for step in steps:
+        if step["files"]:
+            save_files(obj, step["name"], step["files"], c.from_user.full_name)
+
+    # Маркируем как завершённый
+    mark_completed(obj, c.from_user.full_name)
+
+    # Отправляем в архив
+    route = mapping_lookup(work_chat_id, work_thread_id)
+    if route:
+        archive_chat_id = route["chat_id"]
+        archive_thread_id = route["thread_id"]
+        await _send_to_archive(obj, obj_name, steps, archive_chat_id, archive_thread_id, c.from_user.full_name)
+
+    await c.message.edit_text(f"✅ Объект #{obj} завершён и отправлен в архив.", reply_markup=None)
+    await state.clear()
+    await c.answer("Готово ✅")
+
+async def _send_to_archive(obj: str, obj_name: str, steps: list, chat_id: int, thread_id: int, author: str):
+    text = f"📁 Объект #{obj} — {obj_name}\n👤 {author}\n\n"
+    for step in steps:
+        if step["files"]:
+            text += f"📌 {step['name']} ({len(step['files']} файлов)\n"
+    media = []
+    for step in steps:
+        for f in step["files"]:
+            if f["type"] == "photo":
+                media.append(InputMediaPhoto(media=f["file_id"], caption=text if not media else None))
+            elif f["type"] == "video":
+                media.append(InputMediaVideo(media=f["file_id"], caption=text if not media else None))
+            elif f["type"] == "document":
+                media.append(InputMediaDocument(media=f["file_id"], caption=text if not media else None))
+            if len(media) >= 10:
+                await safe_call(bot.send_media_group(chat_id, media, message_thread_id=thread_id))
+                media = []
+                text = None
+    if media:
+        await safe_call(bot.send_media_group(chat_id, media, message_thread_id=thread_id))
+
+# ========== ФИНАЛИЗАЦИЯ /addphoto ==========
+@router.message(AddPhoto.uploading, F.text == "/done")
+async def finalize_addphoto(m: Message, state: FSMContext):
+    data = await state.get_data()
+    obj = data["object"]
+    files = data.get("files", [])
+    if not files:
+        await m.answer("❌ Нет файлов для сохранения.")
+        return
+
+    save_files(obj, "Дополнительные фото", files, m.from_user.full_name)
+    await m.answer(f"✅ Дополнительные файлы для #{obj} сохранены.")
     await state.clear()
 
-# ========== ДОБАВЛЕНО: СОХРАНЕНИЕ ФАЙЛОВ ЛОКАЛЬНО ==========
-async def save_to_local_archive(files: list, chat_id: int, thread_id: int, object_id: str):
-    """Сохраняет копии всех файлов локально по структуре downloads/chat_id/thread_id/object_id"""
-    base_folder = os.path.join("downloads", str(chat_id), str(thread_id), str(object_id))
-    os.makedirs(base_folder, exist_ok=True)
+# ========== ИНФОРМАЦИЯ ПО ОБЪЕКТАМ ==========
+@router.message(Info.waiting_object)
+async def info_objects(m: Message, state: FSMContext):
+    objs = [o.strip() for o in m.text.split(",")]
+    lines = []
+    for obj in objs:
+        info = get_object_info(m.chat.id, obj)
+        if isinstance(info, dict) and "error" in info:
+            lines.append(f"❌ #{obj}: {info['error']}")
+        elif info is None:
+            lines.append(f"❌ #{obj}: не найден")
+        else:
+            lines.append(
+                f"✅ #{info['id']}\n"
+                f"🏷️ {info['consumer']}\n"
+                f"🏢 {info['object']}\n"
+                f"📍 {info['address']}"
+            )
+    await m.answer("\n\n".join(lines) if lines else "—", reply_markup=main_kb())
+    await state.clear()
 
-    for f in files:
-        file_id = f["file_id"]
-        ext = ".jpg" if f["type"] == "photo" else ".mp4" if f["type"] == "video" else ""
-        filename = f"{f['type']}_{file_id[:8]}{ext or '.bin'}"
-        path = os.path.join(base_folder, filename)
-        try:
-            tg_file = await bot.get_file(file_id)
-            await bot.download_file(tg_file.file_path, path)
-            print(f"💾 Сохранено локально: {path}")
-        except Exception as e:
-            print(f"⚠️ Ошибка локального сохранения {file_id}: {e}")
-
-
-# ========== ОТПРАВКА В АРХИВ ==========
-async def post_archive_single_group(object_id: str, object_name: str, files: list, author: str, state_data: dict):
-    """
-    Отправка заголовка, медиа и документов в соответствующую архивную группу и тему.
-    + дублирование файлов локально.
-    """
-    try:
-        work_chat_id = state_data.get("work_chat_id")
-        work_thread_id = state_data.get("work_thread_id")
-
-        mapping = mapping_lookup(work_chat_id, work_thread_id)
-        if not mapping:
-            return
-
-        archive_chat_id = mapping["chat_id"]
-        archive_thread_id = mapping["thread_id"]
-
-        # 💾 Сохраняем файлы локально
-        await save_to_local_archive(files, archive_chat_id, archive_thread_id, object_id)
-
-        header = (
-            f"💾 ОБЪЕКТ #{object_id}\n"
-            f"🏷️ {object_name or ''}\n"
-            f"👤 Исполнитель: {author}\n"
-            f"🕒 {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-        )
-        await bot.send_message(archive_chat_id, header, message_thread_id=archive_thread_id)
-
-        batch = []
-        for f in files:
-            if f["type"] == "photo":
-                batch.append(InputMediaPhoto(media=f["file_id"]))
-            elif f["type"] == "video":
-                batch.append(InputMediaVideo(media=f["file_id"]))
-            elif f["type"] == "document":
-                await bot.send_document(archive_chat_id, f["file_id"], message_thread_id=archive_thread_id)
-            if len(batch) == 10:
-                await bot.send_media_group(archive_chat_id, batch, message_thread_id=archive_thread_id)
-                batch = []
-        if batch:
-            await bot.send_media_group(archive_chat_id, batch, message_thread_id=archive_thread_id)
-    except Exception as e:
-        print(f"[archive_single_group] Ошибка при отправке в архив: {e}")
-
-# ========== WEBHOOK / APP ==========
-async def on_startup():
+# ========== ЗАПУСК ==========
+async def main():
     init_db()
     load_settings()
-    webhook_url = f"{WEBHOOK_URL}/{TOKEN}"
-    await bot.delete_webhook(drop_pending_updates=True)
-    await bot.set_webhook(webhook_url)
-    await bot.set_my_commands([
-        BotCommand(command="start", description="Запуск бота"),
-        BotCommand(command="photo", description="Загрузка фото"),
-        BotCommand(command="addphoto", description="Добавить фото"),
-        BotCommand(command="info", description="Информация по объекту"),
-        BotCommand(command="result", description="Завершённые загрузки"),
-        BotCommand(command="admin", description="Админ-панель"),
-    ])
-    asyncio.create_task(keepalive())
-    print("✅ Webhook установлен:", webhook_url)
-    print("💡 KEEPALIVE активен каждые 4 минуты. Оставьте внешний пинг 5 минут.")
-
-async def handle_webhook(request):
-    data = await request.json()
-    from aiogram.types import Update
-    update = Update(**data)
-    asyncio.create_task(dp.feed_update(bot, update))
-    return web.Response(text="OK")
-
-async def health(request):
-    return web.Response(text="🤖 OK")
-
-def main():
     dp.include_router(router)
+    
+    # Установка команд бота
+    commands = [
+        BotCommand(command="start", description="Запуск бота"),
+        BotCommand(command="addphoto", description="Добавить фото к объекту"),
+        BotCommand(command="info", description="Информация по объектам"),
+        BotCommand(command="photo", description="Новая загрузка"),
+        BotCommand(command="result", description="Список обработанных объектов"),
+        BotCommand(command="admin", description="Админ-панель")
+    ]
+    await bot.set_my_commands(commands)
+    
+    # Запуск keepalive
+    asyncio.create_task(keepalive())
+    
+    # Настройка вебхука
+    await bot.set_webhook(f"{WEBHOOK_URL}/webhook")
+    
+    # Запуск сервера
     app = web.Application()
-    app.router.add_post(f"/{TOKEN}", handle_webhook)
-    app.router.add_get("/", health)
-    app.on_startup.append(lambda a: asyncio.create_task(on_startup()))
-    web.run_app(app, host="0.0.0.0", port=PORT)
+    app.router.add_post("/webhook", lambda r: dp.feed_webhook_update(bot, await r.json()))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    print(f"🚀 Бот запущен на порту {PORT}")
+    
+    # Бесконечный цикл
+    while True:
+        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
-    main()
-
+    asyncio.run(main())
