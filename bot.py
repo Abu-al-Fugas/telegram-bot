@@ -1020,52 +1020,53 @@ async def info_object(m: Message, state: FSMContext):
     await m.answer("\n\n".join(responses))
     await state.clear()
 
-# ========== ОТПРАВКА В АРХИВ С УЧЁТОМ МАРШРУТИЗАЦИИ ==========
+# ========== ДОБАВЛЕНО: СОХРАНЕНИЕ ФАЙЛОВ ЛОКАЛЬНО ==========
+async def save_to_local_archive(files: list, chat_id: int, thread_id: int, object_id: str):
+    """Сохраняет копии всех файлов локально по структуре downloads/chat_id/thread_id/object_id"""
+    base_folder = os.path.join("downloads", str(chat_id), str(thread_id), str(object_id))
+    os.makedirs(base_folder, exist_ok=True)
+
+    for f in files:
+        file_id = f["file_id"]
+        ext = ".jpg" if f["type"] == "photo" else ".mp4" if f["type"] == "video" else ""
+        filename = f"{f['type']}_{file_id[:8]}{ext or '.bin'}"
+        path = os.path.join(base_folder, filename)
+        try:
+            tg_file = await bot.get_file(file_id)
+            await bot.download_file(tg_file.file_path, path)
+            print(f"💾 Сохранено локально: {path}")
+        except Exception as e:
+            print(f"⚠️ Ошибка локального сохранения {file_id}: {e}")
+
+
+# ========== ОТПРАВКА В АРХИВ ==========
 async def post_archive_single_group(object_id: str, object_name: str, files: list, author: str, state_data: dict):
     """
     Отправка заголовка, медиа и документов в соответствующую архивную группу и тему.
-    Соответствие определяется по TOPIC_MAP[work_chat_id][work_thread_id] (нормализация ключей есть).
+    + дублирование файлов локально.
     """
     try:
         work_chat_id = state_data.get("work_chat_id")
         work_thread_id = state_data.get("work_thread_id")
 
         mapping = mapping_lookup(work_chat_id, work_thread_id)
-        if not mapping or not mapping.get("chat_id") or not mapping.get("thread_id"):
-            # Сообщим прямо в рабочую тему, что маршрут не настроен
-            try:
-                await safe_call(bot.send_message(
-                    chat_id=work_chat_id,
-                    text=(
-                        "⚠️ Не найдена архивная тема для отправки.\n\n"
-                        f"Источник: chat_id={work_chat_id}, thread_id={work_thread_id}\n"
-                        f"Объект #{object_id} «{object_name or ''}».\n"
-                        f"Добавьте соответствие в TOPIC_MAP и повторите."
-                    ),
-                    message_thread_id=work_thread_id
-                ))
-            except Exception as ee:
-                print(f"[archive warn] cannot notify source chat: {ee}")
+        if not mapping:
             return
 
         archive_chat_id = mapping["chat_id"]
         archive_thread_id = mapping["thread_id"]
 
-        title = object_name or ""
+        # 💾 Сохраняем файлы локально
+        await save_to_local_archive(files, archive_chat_id, archive_thread_id, object_id)
+
         header = (
             f"💾 ОБЪЕКТ #{object_id}\n"
-            f"🏷️ {title}\n"
+            f"🏷️ {object_name or ''}\n"
             f"👤 Исполнитель: {author}\n"
             f"🕒 {datetime.now().strftime('%d.%m.%Y %H:%M')}"
         )
-        # Заголовок
-        await safe_call(bot.send_message(
-            archive_chat_id,
-            header,
-            message_thread_id=archive_thread_id
-        ))
+        await bot.send_message(archive_chat_id, header, message_thread_id=archive_thread_id)
 
-        # Медиа альбомами по 10
         batch = []
         for f in files:
             if f["type"] == "photo":
@@ -1073,22 +1074,12 @@ async def post_archive_single_group(object_id: str, object_name: str, files: lis
             elif f["type"] == "video":
                 batch.append(InputMediaVideo(media=f["file_id"]))
             elif f["type"] == "document":
-                pass
+                await bot.send_document(archive_chat_id, f["file_id"], message_thread_id=archive_thread_id)
             if len(batch) == 10:
-                await safe_call(bot.send_media_group(
-                    archive_chat_id, batch, message_thread_id=archive_thread_id
-                ))
+                await bot.send_media_group(archive_chat_id, batch, message_thread_id=archive_thread_id)
                 batch = []
         if batch:
-            await safe_call(bot.send_media_group(
-                archive_chat_id, batch, message_thread_id=archive_thread_id
-            ))
-
-        # Документы по одному
-        for d in [x for x in files if x["type"] == "document"]:
-            await safe_call(bot.send_document(
-                archive_chat_id, d["file_id"], message_thread_id=archive_thread_id
-            ))
+            await bot.send_media_group(archive_chat_id, batch, message_thread_id=archive_thread_id)
     except Exception as e:
         print(f"[archive_single_group] Ошибка при отправке в архив: {e}")
 
@@ -1131,3 +1122,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
