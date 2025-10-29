@@ -35,9 +35,6 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
 
-# 👑 Главный админ(ы)
-ADMIN_IDS = {7277619113}  # Mr. X
-
 # ========== МАРШРУТИЗАЦИЯ ТЕМ (WORK → ARCHIVE) ==========
 TOPIC_MAP = {
     -1003281117256: {  # Рабочая группа A (dagestan.xlsx)
@@ -180,24 +177,7 @@ class AddPhoto(StatesGroup):
 class Info(StatesGroup):
     waiting_object = State()
 
-class AdminState(StatesGroup):
-    waiting_command = State()
-    waiting_route = State()
-    waiting_route_del = State()
-    waiting_excel = State()
-    waiting_excel_del = State()
-
 # ========== KEYBOARDS ==========
-def admin_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Посмотреть маршруты", callback_data="admin_routes")],
-        [InlineKeyboardButton(text="🧭 Добавить маршрут", callback_data="admin_add_route")],
-        [InlineKeyboardButton(text="❌ Удалить маршрут", callback_data="admin_del_route")],
-        [InlineKeyboardButton(text="📘 Посмотреть Excel", callback_data="admin_excel")],
-        [InlineKeyboardButton(text="➕ Добавить Excel", callback_data="admin_add_excel")],
-        [InlineKeyboardButton(text="🗑 Удалить Excel", callback_data="admin_del_excel")],
-    ])
-
 def main_kb():
     # порядок: addphoto, info, photo (в одну строку)
     return ReplyKeyboardMarkup(
@@ -273,9 +253,6 @@ async def keepalive():
         await asyncio.sleep(240)
 
 # ========== HELPERS FOR EXCEL / MAPPING ==========
-def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
-
 def get_excel_filename_for_chat(chat_id: int) -> str | None:
     return EXCEL_MAP.get(str(chat_id)) or EXCEL_MAP.get(chat_id)
 
@@ -318,18 +295,6 @@ def get_object_info(chat_id: int, object_id: str):
     except Exception as e:
         return {"error": f"{filename}: {e}"}
 
-# ========== ADMIN HANDLERS (unchanged logic) ==========
-@router.message(Command("admin"))
-async def admin_panel(m: Message, state: FSMContext):
-    if not is_admin(m.from_user.id):
-        await m.answer("🚫 У вас нет доступа к админ-панели.")
-        return
-    await m.answer("👑 Панель администратора:", reply_markup=admin_kb())
-    await state.set_state(AdminState.waiting_command)
-
-# admin other handlers omitted in this snippet for brevity — keep their logic if previously present
-# If you need full admin handlers restored exactly, we can add them back; currently earlier admin handlers are preserved.
-
 # ========== USER COMMANDS ==========
 @router.message(Command("start"))
 async def cmd_start(m: Message):
@@ -352,6 +317,7 @@ async def cmd_addphoto(m: Message, state: FSMContext):
         owner_id=m.from_user.id,
         work_chat_id=m.chat.id,
         work_thread_id=getattr(m, "message_thread_id", None),
+        step_msg=None
     )
     await m.answer("🔢 Введите номер объекта (для добавления файлов):")
 
@@ -379,6 +345,8 @@ async def cmd_photo(m: Message, state: FSMContext):
         owner_id=m.from_user.id,
         work_chat_id=m.chat.id,
         work_thread_id=getattr(m, "message_thread_id", None),
+        step_msg=None,
+        save_shown_for_step=-1
     )
     await m.answer("🔢 Введите номер объекта:")
 
@@ -411,8 +379,8 @@ async def check_upload_object(m: Message, state: FSMContext):
             owner_id=m.from_user.id,
             work_chat_id=m.chat.id,
             work_thread_id=getattr(m, "message_thread_id", None),
-            step_msg=None,                # (chat_id, message_id) текущего сообщения шага
-            save_shown_for_step=-1        # индекс шага, для которого уже показали action_kb
+            step_msg=None,
+            save_shown_for_step=-1
         )
         await state.set_state(Upload.confirming)
         await m.answer(
@@ -452,7 +420,7 @@ async def check_add_object(m: Message, state: FSMContext):
         await m.answer(f"❌ Ошибка чтения: {name or 'неизвестно'}")
         await state.clear()
 
-# ===== Подтверждение /photo =====
+# ===== Confirmations =====
 @router.callback_query(F.data.startswith("photo_confirm_yes_"))
 async def photo_confirm_yes(c: CallbackQuery, state: FSMContext):
     user_id = int(c.data.split("_")[-1])
@@ -464,7 +432,7 @@ async def photo_confirm_yes(c: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     step0 = data["steps"][0]["name"]
     owner_id = data.get("owner_id")
-    # Отправляем сообщение шага с одной кнопкой "Отмена" (не показываем Save)
+    # Отправляем сообщение шага с одной кнопкой "Отмена"
     try:
         await safe_edit_message(c.message, step0, reply_markup=cancel_only_kb(owner_id))
         await state.update_data(step_msg=(c.message.chat.id, c.message.message_id), save_shown_for_step=-1)
@@ -474,7 +442,6 @@ async def photo_confirm_yes(c: CallbackQuery, state: FSMContext):
             await state.update_data(step_msg=(sent.chat.id, sent.message_id), save_shown_for_step=-1)
     await safe_cq_answer(c, "Подтверждено ✅")
 
-# ===== Подтверждение /addphoto =====
 @router.callback_query(F.data.startswith("add_confirm_yes_"))
 async def add_confirm_yes(c: CallbackQuery, state: FSMContext):
     user_id = int(c.data.split("_")[-1])
@@ -486,8 +453,7 @@ async def add_confirm_yes(c: CallbackQuery, state: FSMContext):
     obj = data["object"]
     owner_id = data.get("owner_id")
     await state.set_state(AddPhoto.uploading)
-    # Для addphoto показываем только кнопку Отмена — пользователь отправляет файлы,
-    # после отправки файлов появится "Выберите действие: Сохранить / Отмена"
+    # Для addphoto показываем только кнопку Отмена — после отправки файлов появится action_kb
     try:
         await safe_edit_message(c.message, f"📸 Отправьте дополнительные файлы для объекта №{obj}.", reply_markup=cancel_only_kb(owner_id))
         await state.update_data(step_msg=(c.message.chat.id, c.message.message_id))
@@ -497,7 +463,7 @@ async def add_confirm_yes(c: CallbackQuery, state: FSMContext):
             await state.update_data(step_msg=(sent.chat.id, sent.message_id))
     await safe_cq_answer(c, "Подтверждено ✅")
 
-# ====== ОТМЕНА (универсальная) ======
+# ===== Cancel (universal) =====
 @router.callback_query(F.data.startswith("cancel_"))
 async def cancel_anywhere(c: CallbackQuery, state: FSMContext):
     parts = c.data.split("_", 1)
@@ -547,7 +513,7 @@ async def _finalize_media_group_for_photo(m: Message, state: FSMContext, group_i
 
     await state.update_data(steps=steps, media_groups=media_groups)
 
-    # показать пользователю action_kb (Выберите действие) — заменив предыдущее сообщение шага
+    # показать пользователю действие — заменяя предыдущее сообщение шага
     await _show_action_for_current_step(state, m.chat.id, step_i, m)
 
     finalizing.discard(group_id)
@@ -612,7 +578,7 @@ async def single_file_uploading(m: Message, state: FSMContext):
     file_id = m.photo[-1].file_id if m.photo else m.video.file_id if m.video else m.document.file_id
     cur["files"].append({"type": file_type, "file_id": file_id})
     await state.update_data(steps=steps)
-    # не отправляем "Файл принят" — показываем action кнопки
+    # показать action клавиатуру "Выберите действие:"
     await _show_action_for_current_step(state, m.chat.id, step_i, m)
 
 @router.message(AddPhoto.uploading, (F.photo | F.video | F.document) & ~F.media_group_id)
@@ -623,7 +589,7 @@ async def single_file_addphoto(m: Message, state: FSMContext):
     file_id = m.photo[-1].file_id if m.photo else m.video.file_id if m.video else m.document.file_id
     files.append({"type": file_type, "file_id": file_id})
     await state.update_data(files=files)
-    # для addphoto показываем action клавиатуру
+    # показать action клавиатуру для addphoto
     await _show_action_for_addphoto(state, m.chat.id, m)
 
 # show "Выберите действие:" for current step in /photo flow
@@ -673,32 +639,30 @@ async def _show_action_for_addphoto(state: FSMContext, chat_id: int, context_msg
 # ========== SAVE CALLBACK (handles both /photo and addphoto save) ==========
 @router.callback_query(F.data.startswith("save_"))
 async def save_callback(c: CallbackQuery, state: FSMContext):
-    # save_{user_id}
+    # save_{user_id} — user_id may be empty string
     try:
         uid_part = c.data.split("_", 1)[1]
         user_id = int(uid_part) if uid_part != "" else None
     except:
-        await safe_cq_answer(c, "Эта кнопка не для вас 😅", show_alert=True)
-        return
+        user_id = None
 
     data = await state.get_data()
-    # verify user
+    # verify user if user_id present
     if user_id and c.from_user.id != user_id:
         await safe_cq_answer(c, "Эта кнопка не для вас 😅", show_alert=True)
         return
 
-    # Distinguish flows: /photo flow has 'steps' key, addphoto uses 'files'
+    # Photo flow
     if "steps" in data:
-        # photo flow
         step_i = data.get("step", 0)
         steps = data.get("steps", [])
         if not isinstance(steps, list) or step_i >= len(steps):
-            await safe_cq_answer(c)  # silent
+            await safe_cq_answer(c)
             await state.clear()
             return
         cur = steps[step_i]
         if not cur.get("files"):
-            await safe_cq_answer(c)  # silent
+            await safe_cq_answer(c)
             return
         obj = data.get("object")
         # save step to DB
@@ -706,7 +670,7 @@ async def save_callback(c: CallbackQuery, state: FSMContext):
         # advance
         step_i += 1
         await state.update_data(step=step_i, steps=steps, save_shown_for_step=-1)
-        # if finished 8 steps -> background archive + move to video state
+        # if finished all steps -> background archive + move to video state
         if step_i >= len(steps):
             work_chat_id = data.get("work_chat_id")
             work_thread_id = data.get("work_thread_id")
@@ -727,6 +691,7 @@ async def save_callback(c: CallbackQuery, state: FSMContext):
             # edit message to show video step prompt with cancel button
             try:
                 await safe_edit_message(c.message, VIDEO_STEP, reply_markup=cancel_only_kb(owner_id))
+                # store this message to be deleted later after video uploaded
                 await state.update_data(step_msg=(c.message.chat.id, c.message.message_id))
             except Exception:
                 sent = await safe_call(bot.send_message(data["work_chat_id"], VIDEO_STEP, reply_markup=cancel_only_kb(owner_id), message_thread_id=data.get("work_thread_id")))
@@ -747,8 +712,8 @@ async def save_callback(c: CallbackQuery, state: FSMContext):
         await safe_cq_answer(c, "✅ Сохранено")
         return
 
+    # Addphoto flow
     elif "files" in data:
-        # addphoto flow: save additional photos and send to archive immediately
         files = data.get("files", [])
         if not files:
             await safe_cq_answer(c)
@@ -760,12 +725,25 @@ async def save_callback(c: CallbackQuery, state: FSMContext):
         work_thread_id = data.get("work_thread_id")
         # save to DB
         save_files(obj, "Дополнительные фото", files, c.from_user.full_name)
-        # send to archive
+        # edit the action message into confirmation text
+        try:
+            await safe_edit_message(c.message, "✅ Файлы отправлены. Спасибо!", reply_markup=None)
+        except Exception:
+            # if cannot edit (rare), try to delete previous and send simple confirmation
+            try:
+                if c.message:
+                    await safe_call(bot.delete_message(c.message.chat.id, c.message.message_id))
+            except Exception:
+                pass
+            try:
+                await safe_call(bot.send_message(owner_id, "✅ Файлы отправлены. Спасибо!"))
+            except Exception:
+                pass
+        # send to archive in background
         route = mapping_lookup(work_chat_id, work_thread_id)
         if route:
             archive_chat_id = route["chat_id"]
             archive_thread_id = route["thread_id"]
-            # send header then media
             asyncio.create_task(_send_header_and_files_to_archive(obj, obj_name, files, archive_chat_id, archive_thread_id, c.from_user.full_name))
         else:
             try:
@@ -773,24 +751,24 @@ async def save_callback(c: CallbackQuery, state: FSMContext):
             except Exception:
                 logger.exception("Could not notify owner about missing route")
         await state.clear()
-        await safe_cq_answer(c, "✅ Файлы сохранены и отправляются в Архив")
+        await safe_cq_answer(c, "✅ Файлы отправлены. Идёт отправка в Архив.")
         return
+
     else:
-        await safe_cq_answer(c)  # nothing to do
+        await safe_cq_answer(c)
         return
 
 # ========== BACKGROUND ARCHIVE & NOTIFY ==========
 async def _archive_and_notify(owner_id: int, obj: str, obj_name: str, steps: list, chat_id: int, thread_id: int, author: str):
     try:
-        # Send header (object info) first
+        # Send header first
         header_text = f"Объект #{obj}\n🏠 {obj_name}\n🙋🏻‍♂️ {author}"
         try:
             await safe_call(bot.send_message(chat_id, header_text, message_thread_id=thread_id))
         except Exception:
             logger.exception("Failed to send header to archive")
-        # then send files step-by-step grouped (no captions to each group)
+        # then send files grouped (by 10)
         media_buffer = []
-        count = 0
         for step in steps:
             for f in step.get("files", []):
                 if f["type"] == "photo":
@@ -877,12 +855,18 @@ async def video_uploading(m: Message, state: FSMContext):
 
     save_files(obj, VIDEO_STEP, [{"type": "video", "file_id": file_id}], m.from_user.full_name)
     mark_completed(obj, m.from_user.full_name)
+
+    # удаляем сообщение шага для видео (если есть)
+    step_msg = data.get("step_msg")
+    if step_msg:
+        try:
+            stored_chat, stored_mid = step_msg
+            await safe_call(bot.delete_message(stored_chat, stored_mid))
+        except Exception:
+            logger.debug("Could not delete video step message", exc_info=True)
+
     await m.answer("✅ Видео отправлено и объект завершён. Спасибо!")
     await state.clear()
-
-# ========== ADDPHOTO FINALIZE (removed /done logic — handled via action buttons) ==========
-# /done handler removed on purpose. addphoto now shows action_kb after files are sent,
-# and Save button triggers sending of files and clearing state.
 
 # ========== INFO ==========
 @router.message(Info.waiting_object)
@@ -931,8 +915,7 @@ async def main():
         BotCommand(command="addphoto", description="Добавить фото к объекту"),
         BotCommand(command="info", description="Информация по объектам"),
         BotCommand(command="photo", description="Новая загрузка"),
-        BotCommand(command="result", description="Список обработанных объектов"),
-        BotCommand(command="admin", description="Админ-панель")
+        BotCommand(command="result", description="Список обработанных объектов")
     ]
     try:
         await bot.set_my_commands(commands)
