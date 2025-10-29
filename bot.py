@@ -1,15 +1,3 @@
-# bot.py
-# Полный обновлённый файл — включает все улучшения, которые вы просили:
-# - порядок кнопок: /addphoto, /info, /photo
-# - шаги /photo: 8 обязательных шагов, затем фоновая отправка + этап видео (авто-отправка)
-# - убрана логика пропуска шагов, убраны лишние алерты
-# - addphoto: только кнопка "Отмена"
-# - безопасная обработка callback'ов, guard для индексов, предотвращение IndexError
-# - безопасный webhook handler (async handler), закрытие bot.session на shutdown
-# - обработка TelegramRetryAfter и TelegramBadRequest в ключевых местах
-# - фоновые таски для отправки в архив (чтобы пользователь мог отправлять видео, положить телефон и ждать)
-# Убедитесь, что переменные окружения TELEGRAM_BOT_TOKEN и WEBHOOK_URL установлены.
-
 import os
 import asyncio
 from datetime import datetime
@@ -1118,3 +1106,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Shutting down")
+
