@@ -36,6 +36,7 @@ dp = Dispatcher(storage=storage)
 router = Router()
 
 # ========== МАРШРУТИЗАЦИЯ ТЕМ (WORK → ARCHIVE) ==========
+# Оставлены настройки в коде; вы изменяете их программно
 TOPIC_MAP = {
     -1003281117256: {  # Рабочая группа A (dagestan.xlsx)
         3: {"chat_id": -1003250982118, "thread_id": 3},
@@ -179,7 +180,6 @@ class Info(StatesGroup):
 
 # ========== KEYBOARDS ==========
 def main_kb():
-    # порядок: addphoto, info, photo (в одну строку)
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="/addphoto"), KeyboardButton(text="/info"), KeyboardButton(text="/photo")]
@@ -194,7 +194,6 @@ def cancel_only_kb(user_id: int | None):
     ])
 
 def action_kb(user_id: int | None):
-    # Клавиатура "Выберите действие:" — одна и та же для фото и addphoto после отправки файлов
     uid = user_id or ""
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="💾 Сохранить", callback_data=f"save_{uid}"),
@@ -295,6 +294,13 @@ def get_object_info(chat_id: int, object_id: str):
     except Exception as e:
         return {"error": f"{filename}: {e}"}
 
+# проверка строгой привязки: команда может выполняться ТОЛЬКО в теме (message_thread_id),
+# и только если для этой темы есть маршрут в TOPIC_MAP
+def is_topic_allowed(chat_id: int, thread_id: int | None) -> bool:
+    if thread_id is None:
+        return False
+    return mapping_lookup(chat_id, thread_id) is not None
+
 # ========== USER COMMANDS ==========
 @router.message(Command("start"))
 async def cmd_start(m: Message):
@@ -303,48 +309,53 @@ async def cmd_start(m: Message):
         "📎 /addphoto — добавить фото\n"
         "ℹ️ /info — информация по объектам\n"
         "📸 /photo — новая загрузка\n"
-        "⚙️ Работает в темах форумов (супергруппы).",
+        "⚙️ Работает в темах форумах (супергруппы).",
         reply_markup=main_kb()
     )
 
 @router.message(Command("addphoto"))
 async def cmd_addphoto(m: Message, state: FSMContext):
-    if not get_excel_filename_for_chat(m.chat.id):
-        await m.answer("⚠️ К этой группе не привязан Excel-документ. Обратитесь к администратору.")
+    # строгая привязка к теме
+    thread_id = getattr(m, "message_thread_id", None)
+    if not is_topic_allowed(m.chat.id, thread_id):
+        await m.answer("⚠️ Эта команда доступна только в конкретных темах (топиках). Обратитесь к администратору.")
         return
     await state.set_state(AddPhoto.waiting_object)
     await state.update_data(
         owner_id=m.from_user.id,
         work_chat_id=m.chat.id,
-        work_thread_id=getattr(m, "message_thread_id", None),
-        step_msg=None
+        work_thread_id=thread_id,
+        step_msg=None,
+        files=[]
     )
     await m.answer("🔢 Введите номер объекта (для добавления файлов):")
 
 @router.message(Command("info"))
 async def cmd_info(m: Message, state: FSMContext):
-    if not get_excel_filename_for_chat(m.chat.id):
-        await m.answer("⚠️ К этой группе не привязан Excel-документ. Обратитесь к администратору.")
+    # строгая привязка к теме
+    thread_id = getattr(m, "message_thread_id", None)
+    if not is_topic_allowed(m.chat.id, thread_id):
+        await m.answer("⚠️ Эта команда доступна только в конкретных темах (топиках). Обратитесь к администратору.")
         return
     await state.set_state(Info.waiting_object)
     await state.update_data(
         owner_id=m.from_user.id,
         work_chat_id=m.chat.id,
-        work_thread_id=getattr(m, "message_thread_id", None),
+        work_thread_id=thread_id,
     )
     await m.answer("📝 Введите один или несколько номеров объектов (через запятую):")
 
 @router.message(Command("photo"))
 async def cmd_photo(m: Message, state: FSMContext):
-    if not get_excel_filename_for_chat(m.chat.id):
-        await m.answer("⚠️ К этой группе не привязан Excel-документ. Обратитесь к администратору.")
+    thread_id = getattr(m, "message_thread_id", None)
+    if not is_topic_allowed(m.chat.id, thread_id):
+        await m.answer("⚠️ Эта команда доступна только в конкретных темах (топиках). Обратитесь к администратору.")
         return
-    # эмодзи "номер" 🔢
     await state.set_state(Upload.waiting_object)
     await state.update_data(
         owner_id=m.from_user.id,
         work_chat_id=m.chat.id,
-        work_thread_id=getattr(m, "message_thread_id", None),
+        work_thread_id=thread_id,
         step_msg=None,
         save_shown_for_step=-1
     )
@@ -371,6 +382,11 @@ async def check_upload_object(m: Message, state: FSMContext):
     obj = m.text.strip()
     ok, name = check_object_excel(m.chat.id, obj)
     if ok:
+        # ensure topic is allowed still (race safety)
+        if not is_topic_allowed(m.chat.id, getattr(m, "message_thread_id", None)):
+            await m.answer("⚠️ Эта тема не привязана к маршруту. Операция отменена.")
+            await state.clear()
+            return
         await state.update_data(
             object=obj,
             object_name=name,
@@ -399,6 +415,11 @@ async def check_add_object(m: Message, state: FSMContext):
     obj = m.text.strip()
     ok, name = check_object_excel(m.chat.id, obj)
     if ok:
+        # ensure topic allowed
+        if not is_topic_allowed(m.chat.id, getattr(m, "message_thread_id", None)):
+            await m.answer("⚠️ Эта тема не привязана к маршруту. Операция отменена.")
+            await state.clear()
+            return
         await state.update_data(
             object=obj,
             object_name=name,
@@ -428,11 +449,17 @@ async def photo_confirm_yes(c: CallbackQuery, state: FSMContext):
         await safe_cq_answer(c, "Эта кнопка не для вас 😅", show_alert=True)
         return
 
+    data = await state.get_data()
+    # verify topic still allowed
+    if not is_topic_allowed(data.get("work_chat_id"), data.get("work_thread_id")):
+        await safe_cq_answer(c, "⚠️ Тема больше не привязана к маршруту. Операция отменена.", show_alert=True)
+        await state.clear()
+        return
+
     await state.set_state(Upload.uploading)
     data = await state.get_data()
     step0 = data["steps"][0]["name"]
     owner_id = data.get("owner_id")
-    # Отправляем сообщение шага с одной кнопкой "Отмена"
     try:
         await safe_edit_message(c.message, step0, reply_markup=cancel_only_kb(owner_id))
         await state.update_data(step_msg=(c.message.chat.id, c.message.message_id), save_shown_for_step=-1)
@@ -450,10 +477,15 @@ async def add_confirm_yes(c: CallbackQuery, state: FSMContext):
         return
 
     data = await state.get_data()
-    obj = data["object"]
+    # verify topic allowed
+    if not is_topic_allowed(data.get("work_chat_id"), data.get("work_thread_id")):
+        await safe_cq_answer(c, "⚠️ Тема не привязана к маршруту. Операция отменена.", show_alert=True)
+        await state.clear()
+        return
+
+    obj = data.get("object")
     owner_id = data.get("owner_id")
     await state.set_state(AddPhoto.uploading)
-    # Для addphoto показываем только кнопку Отмена — после отправки файлов появится action_kb
     try:
         await safe_edit_message(c.message, f"📸 Отправьте дополнительные файлы для объекта №{obj}.", reply_markup=cancel_only_kb(owner_id))
         await state.update_data(step_msg=(c.message.chat.id, c.message.message_id))
@@ -619,7 +651,6 @@ async def _show_action_for_current_step(state: FSMContext, chat_id: int, step_i:
 # show "Выберите действие:" for addphoto flow
 async def _show_action_for_addphoto(state: FSMContext, chat_id: int, context_msg: Message):
     data = await state.get_data()
-    # always replace previous addphoto prompt with action_kb once files arrived
     step_msg = data.get("step_msg")
     if step_msg:
         try:
@@ -683,15 +714,15 @@ async def save_callback(c: CallbackQuery, state: FSMContext):
                 archive_thread_id = route["thread_id"]
                 asyncio.create_task(_archive_and_notify(owner_id, obj, obj_name, steps_copy, archive_chat_id, archive_thread_id, c.from_user.full_name))
             else:
+                logger.warning("No route for work_chat_id=%s thread=%s", work_chat_id, work_thread_id)
                 try:
-                    await safe_call(bot.send_message(owner_id, "⚠️ В этой группе не настроен маршрут в Архив. Обратитесь к администратору."))
+                    await safe_call(bot.send_message(owner_id, "⚠️ В этой теме не настроен маршрут в Архив. Обратитесь к разработчику."))
                 except Exception:
                     logger.exception("Could not notify owner about missing route")
             await state.set_state(Upload.uploading_video)
-            # edit message to show video step prompt with cancel button
+            # edit message to show video step prompt with cancel button and store it
             try:
                 await safe_edit_message(c.message, VIDEO_STEP, reply_markup=cancel_only_kb(owner_id))
-                # store this message to be deleted later after video uploaded
                 await state.update_data(step_msg=(c.message.chat.id, c.message.message_id))
             except Exception:
                 sent = await safe_call(bot.send_message(data["work_chat_id"], VIDEO_STEP, reply_markup=cancel_only_kb(owner_id), message_thread_id=data.get("work_thread_id")))
@@ -725,11 +756,11 @@ async def save_callback(c: CallbackQuery, state: FSMContext):
         work_thread_id = data.get("work_thread_id")
         # save to DB
         save_files(obj, "Дополнительные фото", files, c.from_user.full_name)
-        # edit the action message into confirmation text
+        # Try to edit action message into confirmation text
         try:
             await safe_edit_message(c.message, "✅ Файлы отправлены. Спасибо!", reply_markup=None)
         except Exception:
-            # if cannot edit (rare), try to delete previous and send simple confirmation
+            logger.debug("Could not edit action message to confirmation; will try to send a confirmation message")
             try:
                 if c.message:
                     await safe_call(bot.delete_message(c.message.chat.id, c.message.message_id))
@@ -739,15 +770,16 @@ async def save_callback(c: CallbackQuery, state: FSMContext):
                 await safe_call(bot.send_message(owner_id, "✅ Файлы отправлены. Спасибо!"))
             except Exception:
                 pass
-        # send to archive in background
+        # send to archive in background using stored route
         route = mapping_lookup(work_chat_id, work_thread_id)
         if route:
             archive_chat_id = route["chat_id"]
             archive_thread_id = route["thread_id"]
             asyncio.create_task(_send_header_and_files_to_archive(obj, obj_name, files, archive_chat_id, archive_thread_id, c.from_user.full_name))
         else:
+            logger.warning("No route for addphoto: work_chat_id=%s thread=%s", work_chat_id, work_thread_id)
             try:
-                await safe_call(bot.send_message(owner_id, "⚠️ В этой группе не настроен маршрут в Архив. Обратитесь к администратору."))
+                await safe_call(bot.send_message(owner_id, "⚠️ В этой теме не настроен маршрут в Архив. Обратитесь к разработчику."))
             except Exception:
                 logger.exception("Could not notify owner about missing route")
         await state.clear()
@@ -829,7 +861,7 @@ async def video_uploading(m: Message, state: FSMContext):
     owner_id = data.get("owner_id")
     route = mapping_lookup(work_chat_id, work_thread_id)
     if not route:
-        await m.answer("⚠️ В этой группе не настроен маршрут в Архив. Обратитесь к администратору.")
+        await m.answer("⚠️ В этой теме не настроен маршрут в Архив. Обратитесь к разработчику.")
         await state.clear()
         return
 
