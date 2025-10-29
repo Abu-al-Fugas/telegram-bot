@@ -172,9 +172,8 @@ def list_completed():
         cur = conn.execute("SELECT object_id, author, completed_at FROM completed ORDER BY object_id")
         return cur.fetchall()
 
-# ========== ЗАГРУЗКА/СОХРАНЕНИЕ НАСТРОЕК ==========
+# ========== HELPERS ==========
 def stringify_keys(d):
-    """Рекурсивно преобразует ключи словаря в строки"""
     if isinstance(d, dict):
         return {str(k): stringify_keys(v) for k, v in d.items()}
     elif isinstance(d, list):
@@ -191,15 +190,15 @@ def load_settings():
             TOPIC_MAP = json.loads(val1)
         if val2:
             EXCEL_MAP = json.loads(val2)
-        logger.info("✅ Настройки (TOPIC_MAP/EXCEL_MAP) загружены из БД.")
+        logger.info("Настройки загружены из БД.")
     except Exception as e:
-        logger.exception("⚠️ Ошибка загрузки настроек: %s", e)
+        logger.exception("Ошибка загрузки настроек: %s", e)
 
 def save_settings():
     db_set("TOPIC_MAP", json.dumps(stringify_keys(TOPIC_MAP), ensure_ascii=False))
     db_set("EXCEL_MAP", json.dumps(stringify_keys(EXCEL_MAP), ensure_ascii=False))
 
-# ========== СОСТОЯНИЯ ==========
+# ========== STATES ==========
 class Upload(StatesGroup):
     waiting_object = State()
     confirming = State()
@@ -221,7 +220,7 @@ class AdminState(StatesGroup):
     waiting_excel = State()
     waiting_excel_del = State()
 
-# ========== КЛАВИАТУРЫ ==========
+# ========== KEYBOARDS ==========
 def admin_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 Посмотреть маршруты", callback_data="admin_routes")],
@@ -233,7 +232,7 @@ def admin_kb():
     ])
 
 def main_kb():
-    """Главная клавиатура: /addphoto, /info, /photo в одном ряду"""
+    # порядок: addphoto, info, photo (в одну строку)
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="/addphoto"), KeyboardButton(text="/info"), KeyboardButton(text="/photo")]
@@ -242,10 +241,6 @@ def main_kb():
     )
 
 def step_kb(step_name, has_files=False, user_id: int | None = None, only_cancel=False):
-    """Клавиатура шагов.
-    - has_files=True -> показываем кнопки Сохранить + Отмена
-    - only_cancel=True -> показываем только Отмена (используется для addphoto и видео)
-    """
     cancel_cb = f"cancel_{user_id}" if user_id else "cancel"
     if only_cancel:
         buttons = [[InlineKeyboardButton(text="❌ Отмена", callback_data=cancel_cb)]]
@@ -256,76 +251,18 @@ def step_kb(step_name, has_files=False, user_id: int | None = None, only_cancel=
                 InlineKeyboardButton(text="❌ Отмена", callback_data=cancel_cb)
             ]]
         else:
-            # Показываем кнопку Сохранить и Отмена даже если файлов ещё нет (тихая обработка на сервере)
-            buttons = [[
-                InlineKeyboardButton(text="💾 Сохранить", callback_data=f"save_{user_id}"),
-                InlineKeyboardButton(text="❌ Отмена", callback_data=cancel_cb)
-            ]]
+            # первоначально показываем кнопку Отмена и (непоказанную) кнопку Сохранить пока нет файлов
+            buttons = [[InlineKeyboardButton(text="❌ Отмена", callback_data=cancel_cb)]]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def confirm_kb(prefix: str, user_id: int):
-    """Клавиатура подтверждения с привязкой к user_id"""
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Да", callback_data=f"{prefix}_confirm_yes_{user_id}"),
         InlineKeyboardButton(text="❌ Отмена", callback_data=f"{prefix}_confirm_no_{user_id}")
     ]])
 
-# ========== ХЕЛПЕРЫ ==========
-def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
-
-def get_excel_filename_for_chat(chat_id: int) -> str | None:
-    """Получает имя Excel файла для чата с учётом строковых ключей"""
-    return EXCEL_MAP.get(str(chat_id)) or EXCEL_MAP.get(chat_id)
-
-def mapping_lookup(work_chat_id: int | str, work_thread_id: int | str):
-    """
-    Возвращает словарь {"chat_id": ..., "thread_id": ...} для маршрута,
-    учитывая, что ключи могли быть сериализованы в строки.
-    """
-    sub = TOPIC_MAP.get(work_chat_id) or TOPIC_MAP.get(str(work_chat_id))
-    if not sub:
-        return None
-    m = sub.get(work_thread_id) or sub.get(str(work_thread_id))
-    return m
-
-def check_object_excel(chat_id: int, object_id: str):
-    """Проверка объекта в Excel, привязанном к группе chat_id"""
-    filename = get_excel_filename_for_chat(chat_id)
-    if not filename:
-        return None, "⚠️ К этой группе не привязан Excel-документ. Обратитесь к администратору."
-    try:
-        wb = openpyxl.load_workbook(filename, read_only=True, data_only=True)
-        sh = wb.active
-        for row in sh.iter_rows(min_row=2, values_only=True):
-            if str(row[0]).strip() == str(object_id):
-                return True, str(row[1])
-        return False, None
-    except Exception as e:
-        return None, f"{filename}: {e}"
-
-def get_object_info(chat_id: int, object_id: str):
-    """Получение информации об объекте из Excel, привязанного к группе chat_id"""
-    filename = get_excel_filename_for_chat(chat_id)
-    if not filename:
-        return {"error": "⚠️ К этой группе не привязан Excel-документ. Обратитесь к администратору."}
-    try:
-        wb = openpyxl.load_workbook(filename, read_only=True, data_only=True)
-        sh = wb.active
-        for row in sh.iter_rows(min_row=2, values_only=True):
-            if str(row[0]).strip() == str(object_id):
-                return {
-                    "id": str(row[0]).strip(),
-                    "consumer": str(row[1]) if len(row) > 1 else "Н/Д",
-                    "object": str(row[2]) if len(row) > 2 else "Н/Д",
-                    "address": str(row[3]) if len(row) > 3 else "Н/Д",
-                }
-        return None
-    except Exception as e:
-        return {"error": f"{filename}: {e}"}
-
+# ========== SAFETY HELPERS ==========
 async def safe_call(coro, pause=0.25):
-    """Безопасный вызов с обработкой ограничений Telegram"""
     try:
         res = await coro
         await asyncio.sleep(pause)
@@ -334,23 +271,12 @@ async def safe_call(coro, pause=0.25):
         await asyncio.sleep(e.retry_after + 1)
         return await coro
     except TelegramBadRequest as e:
-        # Иногда Telegram кидает BadRequest: query is too old — игнорируем там, где возможно
         logger.debug("Ignored TelegramBadRequest in safe_call: %s", e)
+        return None
     except Exception:
         logger.exception("Unexpected error in safe_call")
+        return None
 
-# ========== KEEPALIVE ==========
-async def keepalive():
-    """Периодические запросы для поддержания активности"""
-    while True:
-        try:
-            async with aiohttp.ClientSession() as s:
-                await s.get(WEBHOOK_URL)
-        except Exception:
-            logger.debug("keepalive request failed", exc_info=True)
-        await asyncio.sleep(240)  # 4 минуты
-
-# ========== УТИЛИТЫ ДЛЯ БЕЗОПАСНОГО ВЗАИМОДЕЙСТВИЯ С TELEGRAM ==========
 async def safe_cq_answer(cq: CallbackQuery, text: str | None = None, show_alert: bool = False):
     try:
         if text:
@@ -370,7 +296,63 @@ async def safe_edit_message(msg, *args, **kwargs):
     except Exception:
         logger.exception("Unexpected error editing message")
 
-# ========== АДМИН-ПАНЕЛЬ ==========
+# ========== KEEPALIVE ==========
+async def keepalive():
+    while True:
+        try:
+            async with aiohttp.ClientSession() as s:
+                await s.get(WEBHOOK_URL)
+        except Exception:
+            logger.debug("keepalive failed", exc_info=True)
+        await asyncio.sleep(240)
+
+# ========== HELPERS FOR EXCEL / MAPPING ==========
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
+
+def get_excel_filename_for_chat(chat_id: int) -> str | None:
+    return EXCEL_MAP.get(str(chat_id)) or EXCEL_MAP.get(chat_id)
+
+def mapping_lookup(work_chat_id: int | str, work_thread_id: int | str):
+    sub = TOPIC_MAP.get(work_chat_id) or TOPIC_MAP.get(str(work_chat_id))
+    if not sub:
+        return None
+    return sub.get(work_thread_id) or sub.get(str(work_thread_id))
+
+def check_object_excel(chat_id: int, object_id: str):
+    filename = get_excel_filename_for_chat(chat_id)
+    if not filename:
+        return None, "⚠️ К этой группе не привязан Excel-документ. Обратитесь к администратору."
+    try:
+        wb = openpyxl.load_workbook(filename, read_only=True, data_only=True)
+        sh = wb.active
+        for row in sh.iter_rows(min_row=2, values_only=True):
+            if str(row[0]).strip() == str(object_id):
+                return True, str(row[1])
+        return False, None
+    except Exception as e:
+        return None, f"{filename}: {e}"
+
+def get_object_info(chat_id: int, object_id: str):
+    filename = get_excel_filename_for_chat(chat_id)
+    if not filename:
+        return {"error": "⚠️ К этой группе не привязан Excel-документ. Обратитесь к администратору."}
+    try:
+        wb = openpyxl.load_workbook(filename, read_only=True, data_only=True)
+        sh = wb.active
+        for row in sh.iter_rows(min_row=2, values_only=True):
+            if str(row[0]).strip() == str(object_id):
+                return {
+                    "id": str(row[0]).strip(),
+                    "consumer": str(row[1]) if len(row) > 1 else "Н/Д",
+                    "object": str(row[2]) if len(row) > 2 else "Н/Д",
+                    "address": str(row[3]) if len(row) > 3 else "Н/Д",
+                }
+        return None
+    except Exception as e:
+        return {"error": f"{filename}: {e}"}
+
+# ========== ADMIN HANDLERS (unchanged logic) ==========
 @router.message(Command("admin"))
 async def admin_panel(m: Message, state: FSMContext):
     if not is_admin(m.from_user.id):
@@ -546,7 +528,7 @@ async def del_excel_process(m: Message, state: FSMContext):
         await m.answer(f"⚠️ Ошибка: {e}", reply_markup=admin_kb())
     await state.clear()
 
-# ========== КОМАНДЫ ПОЛЬЗОВАТЕЛЯ ==========
+# ========== USER COMMANDS ==========
 @router.message(Command("start"))
 async def cmd_start(m: Message):
     await m.answer(
@@ -589,13 +571,14 @@ async def cmd_photo(m: Message, state: FSMContext):
     if not get_excel_filename_for_chat(m.chat.id):
         await m.answer("⚠️ К этой группе не привязан Excel-документ. Обратитесь к администратору.")
         return
+    # эмодзи "номер" вместо "📝"
     await state.set_state(Upload.waiting_object)
     await state.update_data(
         owner_id=m.from_user.id,
         work_chat_id=m.chat.id,
         work_thread_id=getattr(m, "message_thread_id", None),
     )
-    await m.answer("📝 Введите номер объекта:")
+    await m.answer("🔢 Введите номер объекта:")
 
 @router.message(Command("result"))
 async def cmd_result(m: Message):
@@ -612,7 +595,7 @@ async def cmd_result(m: Message):
         lines.append(f"• #{oid} — {author} ({ts_h})")
     await m.answer("\n".join(lines), reply_markup=main_kb())
 
-# ========== ПРОВЕРКА ОБЪЕКТА + ПОДТВЕРЖДЕНИЕ ==========
+# ========== CHECK OBJECT & CONFIRM ==========
 @router.message(Upload.waiting_object)
 async def check_upload_object(m: Message, state: FSMContext):
     obj = m.text.strip()
@@ -626,6 +609,9 @@ async def check_upload_object(m: Message, state: FSMContext):
             owner_id=m.from_user.id,
             work_chat_id=m.chat.id,
             work_thread_id=getattr(m, "message_thread_id", None),
+            # сохраняем для контроля состояния: step_msg - id сообщения шага, save_shown_for_step - индекс
+            step_msg=None,
+            save_shown_for_step=-1
         )
         await state.set_state(Upload.confirming)
         await m.answer(
@@ -664,7 +650,7 @@ async def check_add_object(m: Message, state: FSMContext):
         await m.answer(f"❌ Ошибка чтения: {name or 'неизвестно'}")
         await state.clear()
 
-# ===== Подтверждение: /photo =====
+# ===== Подтверждение /photo =====
 @router.callback_query(F.data.startswith("photo_confirm_yes_"))
 async def photo_confirm_yes(c: CallbackQuery, state: FSMContext):
     user_id = int(c.data.split("_")[-1])
@@ -676,11 +662,20 @@ async def photo_confirm_yes(c: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     step0 = data["steps"][0]["name"]
     owner_id = data.get("owner_id")
-    await safe_edit_message(c.message, step0, reply_markup=step_kb(step0, has_files=True, user_id=owner_id))
-    await state.update_data(last_msg=c.message.message_id)
+    # Отправляем сообщение шага с одной кнопкой "Отмена"
+    # Редактируем предыдущее подтверждение (удобно), но сохраняем id сообщения
+    try:
+        await safe_edit_message(c.message, step0, reply_markup=step_kb(step0, only_cancel=True, user_id=owner_id))
+        # сохраняем идентификатор отправленного сообщения (оно то же самое c.message)
+        await state.update_data(step_msg=(c.message.chat.id, c.message.message_id), save_shown_for_step=-1)
+    except Exception:
+        # если не можем редактировать, просто отправим новое сообщение
+        msg = await safe_call(bot.send_message(data["work_chat_id"], step0, reply_markup=step_kb(step0, only_cancel=True, user_id=owner_id), message_thread_id=data.get("work_thread_id")))
+        if msg:
+            await state.update_data(step_msg=(msg.chat.id, msg.message_id), save_shown_for_step=-1)
     await safe_cq_answer(c, "Подтверждено ✅")
 
-# ===== Подтверждение: /addphoto =====
+# ===== Подтверждение /addphoto =====
 @router.callback_query(F.data.startswith("add_confirm_yes_"))
 async def add_confirm_yes(c: CallbackQuery, state: FSMContext):
     user_id = int(c.data.split("_")[-1])
@@ -692,22 +687,24 @@ async def add_confirm_yes(c: CallbackQuery, state: FSMContext):
     obj = data["object"]
     owner_id = data.get("owner_id")
     await state.set_state(AddPhoto.uploading)
-    await safe_edit_message(
-        c.message,
-        f"📸 Отправьте дополнительные файлы для объекта №{obj}.",
-        reply_markup=step_kb('', only_cancel=True, user_id=owner_id)
-    )
-    await state.update_data(last_msg=c.message.message_id)
+    # Для addphoto показываем только кнопку Отмена (пользователь отправляет файлы, затем /done)
+    try:
+        await safe_edit_message(c.message, f"📸 Отправьте дополнительные файлы для объекта №{obj}.", reply_markup=step_kb('', only_cancel=True, user_id=owner_id))
+        await state.update_data(step_msg=(c.message.chat.id, c.message.message_id))
+    except Exception:
+        msg = await safe_call(bot.send_message(data["work_chat_id"], f"📸 Отправьте дополнительные файлы для объекта №{obj}.", reply_markup=step_kb('', only_cancel=True, user_id=owner_id), message_thread_id=data.get("work_thread_id")))
+        if msg:
+            await state.update_data(step_msg=(msg.chat.id, msg.message_id))
     await safe_cq_answer(c, "Подтверждено ✅")
 
 # ====== ОТМЕНА (универсальная) ======
 @router.callback_query(F.data.startswith("cancel_"))
 async def cancel_anywhere(c: CallbackQuery, state: FSMContext):
+    parts = c.data.split("_", 1)
+    if len(parts) < 2:
+        await safe_cq_answer(c, "Эта кнопка не для вас 😅", show_alert=True)
+        return
     try:
-        parts = c.data.split("_", 1)
-        if len(parts) < 2:
-            await safe_cq_answer(c, "Эта кнопка не для вас 😅", show_alert=True)
-            return
         user_id = int(parts[1])
     except:
         await safe_cq_answer(c, "Эта кнопка не для вас 😅", show_alert=True)
@@ -724,7 +721,7 @@ async def cancel_anywhere(c: CallbackQuery, state: FSMContext):
         pass
     await safe_cq_answer(c, "Отменено ✅")
 
-# ====== ОТМЕНА подтверждения /photo ======
+# ====== OTHER CANCEL HANDLERS ======
 @router.callback_query(F.data.startswith("photo_confirm_no_"))
 async def cancel_confirm_photo(c: CallbackQuery, state: FSMContext):
     try:
@@ -732,11 +729,9 @@ async def cancel_confirm_photo(c: CallbackQuery, state: FSMContext):
     except:
         await safe_cq_answer(c, "Эта кнопка не для вас 😅", show_alert=True)
         return
-
     if c.from_user.id != user_id:
         await safe_cq_answer(c, "Эта кнопка не для вас 😅", show_alert=True)
         return
-
     await state.clear()
     try:
         await safe_edit_message(c.message, "❌ Действие отменено.", reply_markup=None)
@@ -744,7 +739,6 @@ async def cancel_confirm_photo(c: CallbackQuery, state: FSMContext):
         pass
     await safe_cq_answer(c, "Отменено ✅")
 
-# ====== ОТМЕНА подтверждения /addphoto ======
 @router.callback_query(F.data.startswith("add_confirm_no_"))
 async def cancel_confirm_add(c: CallbackQuery, state: FSMContext):
     try:
@@ -752,11 +746,9 @@ async def cancel_confirm_add(c: CallbackQuery, state: FSMContext):
     except:
         await safe_cq_answer(c, "Эта кнопка не для вас 😅", show_alert=True)
         return
-
     if c.from_user.id != user_id:
         await safe_cq_answer(c, "Эта кнопка не для вас 😅", show_alert=True)
         return
-
     await state.clear()
     try:
         await safe_edit_message(c.message, "❌ Действие отменено.", reply_markup=None)
@@ -764,7 +756,7 @@ async def cancel_confirm_add(c: CallbackQuery, state: FSMContext):
         pass
     await safe_cq_answer(c, "Отменено ✅")
 
-# ========== ПРИЁМ ФАЙЛОВ ==========
+# ========== MEDIA HANDLING ==========
 async def _finalize_media_group_for_photo(m: Message, state: FSMContext, group_id: str):
     await asyncio.sleep(3.2)  # дождаться всех сообщений альбома
     data = await state.get_data()
@@ -779,7 +771,6 @@ async def _finalize_media_group_for_photo(m: Message, state: FSMContext, group_i
 
     if group_id not in media_groups:
         return
-
     if group_id in finalizing:
         return
 
@@ -790,6 +781,9 @@ async def _finalize_media_group_for_photo(m: Message, state: FSMContext, group_i
     cur["files"].extend(files)
 
     await state.update_data(steps=steps, media_groups=media_groups)
+
+    # Показать пользователю кнопку Сохранить (удалив первоначальное сообщение с первой версией)
+    await _ensure_save_button_for_current_step(m.chat.id, state, step_i, cur, m)
 
     finalizing.discard(group_id)
     await state.update_data(finalizing_groups=list(finalizing))
@@ -804,7 +798,6 @@ async def _finalize_media_group_for_addphoto(m: Message, state: FSMContext, grou
 
     if group_id not in media_groups:
         return
-
     if group_id in finalizing:
         return
 
@@ -843,7 +836,6 @@ async def single_file_uploading(m: Message, state: FSMContext):
     step_i = data.get("step", 0)
     steps = data.get("steps", [])
     if step_i >= len(steps):
-        # ignore files if no step available
         await m.answer("⚠️ Ошибка состояния: этап загрузки не найден. Попробуйте /photo заново.")
         await state.clear()
         return
@@ -852,7 +844,8 @@ async def single_file_uploading(m: Message, state: FSMContext):
     file_id = m.photo[-1].file_id if m.photo else m.video.file_id if m.video else m.document.file_id
     cur["files"].append({"type": file_type, "file_id": file_id})
     await state.update_data(steps=steps)
-    await m.answer("✅ Файл принят.")
+    # не отправляем отдельный "Файл принят" — вместо этого обновляем сообщение шага (удаляем и отправляем кнопку Сохранить)
+    await _ensure_save_button_for_current_step(m.chat.id, state, step_i, cur, m)
 
 @router.message(AddPhoto.uploading, (F.photo | F.video | F.document) & ~F.media_group_id)
 async def single_file_addphoto(m: Message, state: FSMContext):
@@ -862,9 +855,35 @@ async def single_file_addphoto(m: Message, state: FSMContext):
     file_id = m.photo[-1].file_id if m.photo else m.video.file_id if m.video else m.document.file_id
     files.append({"type": file_type, "file_id": file_id})
     await state.update_data(files=files)
-    await m.answer("✅ Файл принят.")
+    # для addphoto не меняем кнопки (у пользователя есть /done), но если хотите — можно показать Сохранить
+    # оставим тихое поведение и не шлем сообщения
 
-# ========== СОХРАНЕНИЕ ШАГА /photo ==========
+# helper: ensure save button shown after user uploaded files for current step
+async def _ensure_save_button_for_current_step(chat_id: int, state: FSMContext, step_i: int, cur_step: dict, message_context: Message):
+    data = await state.get_data()
+    save_shown_for_step = data.get("save_shown_for_step", -1)
+    # если уже показали Save для этого шага - ничего не делаем
+    if save_shown_for_step == step_i:
+        return
+    # удаляем предыдущее сообщение шага (если есть)
+    step_msg = data.get("step_msg")
+    if step_msg:
+        try:
+            stored_chat, stored_mid = step_msg
+            await safe_call(bot.delete_message(stored_chat, stored_mid))
+        except Exception:
+            logger.debug("Could not delete previous step message", exc_info=True)
+    # отправляем новое сообщение с кнопками Save + Cancel
+    owner_id = data.get("owner_id")
+    work_thread_id = data.get("work_thread_id")
+    try:
+        sent = await safe_call(bot.send_message(chat_id, cur_step["name"], reply_markup=step_kb(cur_step["name"], has_files=True, user_id=owner_id), message_thread_id=work_thread_id))
+        if sent:
+            await state.update_data(step_msg=(sent.chat.id, sent.message_id), save_shown_for_step=step_i)
+    except Exception:
+        logger.exception("Failed to send step message with save button")
+
+# ========== SAVE STEP CALLBACK ==========
 @router.callback_query(F.data.startswith("save_"))
 async def save_step(c: CallbackQuery, state: FSMContext):
     try:
@@ -872,7 +891,6 @@ async def save_step(c: CallbackQuery, state: FSMContext):
     except:
         await safe_cq_answer(c, "Эта кнопка не для вас 😅", show_alert=True)
         return
-
     if c.from_user.id != user_id:
         await safe_cq_answer(c, "Эта кнопка не для вас 😅", show_alert=True)
         return
@@ -881,24 +899,27 @@ async def save_step(c: CallbackQuery, state: FSMContext):
     step_i = data.get("step", 0)
     steps = data.get("steps", [])
 
+    # защита от неконсистентного состояния
     if not isinstance(steps, list) or step_i >= len(steps):
-        await safe_cq_answer(c)
+        await safe_cq_answer(c)  # тихо
         await state.clear()
         return
 
     cur = steps[step_i]
-
-    # Если нет файлов — тихо игнорируем (удалён всплывающий алерт)
     if not cur.get("files"):
+        # тихо, если по какой-то причине нет файлов
         await safe_cq_answer(c)
         return
 
     obj = data.get("object")
+    # сохраняем step в БД
     save_files(obj, cur["name"], cur["files"], c.from_user.full_name)
 
+    # переходим на следующий шаг
     step_i += 1
-    await state.update_data(step=step_i, steps=steps)
+    await state.update_data(step=step_i, steps=steps, save_shown_for_step=-1)
 
+    # Если все шаги пройдены — запускаем фоновую отправку в архив и переводим на этап видео
     if step_i >= len(steps):
         work_chat_id = data.get("work_chat_id")
         work_thread_id = data.get("work_thread_id")
@@ -912,21 +933,37 @@ async def save_step(c: CallbackQuery, state: FSMContext):
             asyncio.create_task(_archive_and_notify(owner_id, obj, obj_name, steps_copy, archive_chat_id, archive_thread_id, c.from_user.full_name))
         else:
             try:
-                await bot.send_message(owner_id, "⚠️ В этой группе не настроен маршрут в Архив. Обратитесь к администратору.")
+                await safe_call(bot.send_message(owner_id, "⚠️ В этой группе не настроен маршрут в Архив. Обратитесь к администратору."))
             except Exception:
                 logger.exception("Could not notify owner about missing route")
 
+        # переводим состояние на загрузку видео
         await state.set_state(Upload.uploading_video)
-        await safe_edit_message(c.message, VIDEO_STEP, reply_markup=step_kb('', only_cancel=True, user_id=owner_id))
+        # показываем видео-этап с одной кнопкой Отмена
+        try:
+            await safe_edit_message(c.message, VIDEO_STEP, reply_markup=step_kb('', only_cancel=True, user_id=owner_id))
+            await state.update_data(step_msg=(c.message.chat.id, c.message.message_id))
+        except Exception:
+            sent = await safe_call(bot.send_message(data["work_chat_id"], VIDEO_STEP, reply_markup=step_kb('', only_cancel=True, user_id=owner_id), message_thread_id=work_thread_id))
+            if sent:
+                await state.update_data(step_msg=(sent.chat.id, sent.message_id))
         await safe_cq_answer(c, "✅ Сохранено — отправка фотографий в архив запущена в фоне. Теперь пришлите видео (оно отправится автоматически).")
         return
 
+    # иначе показываем следующий шаг — сначала с одной кнопкой "Отмена"
     next_step = steps[step_i]["name"]
     owner_id = data.get("owner_id")
-    await safe_edit_message(c.message, next_step, reply_markup=step_kb(next_step, has_files=True, user_id=owner_id))
+    work_thread_id = data.get("work_thread_id")
+    try:
+        await safe_edit_message(c.message, next_step, reply_markup=step_kb(next_step, only_cancel=True, user_id=owner_id))
+        await state.update_data(step_msg=(c.message.chat.id, c.message.message_id))
+    except Exception:
+        sent = await safe_call(bot.send_message(data["work_chat_id"], next_step, reply_markup=step_kb(next_step, only_cancel=True, user_id=owner_id), message_thread_id=work_thread_id))
+        if sent:
+            await state.update_data(step_msg=(sent.chat.id, sent.message_id))
     await safe_cq_answer(c, "✅ Сохранено")
 
-# ========== ФОН: ОТПРАВКА В АРХИВ И УВЕДОМЛЕНИЕ ==========
+# ========== BACKGROUND ARCHIVE ==========
 async def _archive_and_notify(owner_id: int, obj: str, obj_name: str, steps: list, chat_id: int, thread_id: int, author: str):
     try:
         await _send_to_archive(obj, obj_name, steps, chat_id, thread_id, author)
@@ -941,7 +978,7 @@ async def _archive_and_notify(owner_id: int, obj: str, obj_name: str, steps: lis
         except Exception:
             pass
 
-# ========== ОТПРАВКА В АРХИВ (медиа-группы) ==========
+# ========== SEND TO ARCHIVE ==========
 async def _send_to_archive(obj: str, obj_name: str, steps: list, chat_id: int, thread_id: int, author: str):
     text = f"📁 Объект #{obj} — {obj_name}\n👤 {author}\n\n"
     for step in steps:
@@ -963,7 +1000,7 @@ async def _send_to_archive(obj: str, obj_name: str, steps: list, chat_id: int, t
     if media:
         await safe_call(bot.send_media_group(chat_id, media, message_thread_id=thread_id))
 
-# ========== ЗАГРУЗКА ВИДЕО (9-й шаг) ==========
+# ========== VIDEO UPLOAD ==========
 @router.message(Upload.uploading_video, (F.video | F.document))
 async def video_uploading(m: Message, state: FSMContext):
     data = await state.get_data()
@@ -1001,7 +1038,7 @@ async def video_uploading(m: Message, state: FSMContext):
     await m.answer("✅ Видео отправлено и объект завершён. Спасибо!")
     await state.clear()
 
-# ========== ФИНАЛИЗАЦИЯ /addphoto ==========
+# ========== ADDPHOTO FINALIZE ==========
 @router.message(AddPhoto.uploading, F.text == "/done")
 async def finalize_addphoto(m: Message, state: FSMContext):
     data = await state.get_data()
@@ -1010,12 +1047,11 @@ async def finalize_addphoto(m: Message, state: FSMContext):
     if not files:
         await m.answer("❌ Нет файлов для сохранения.")
         return
-
     save_files(obj, "Дополнительные фото", files, m.from_user.full_name)
     await m.answer(f"✅ Дополнительные файлы для #{obj} сохранены.")
     await state.clear()
 
-# ========== ИНФОРМАЦИЯ ПО ОБЪЕКТАМ ==========
+# ========== INFO ==========
 @router.message(Info.waiting_object)
 async def info_objects(m: Message, state: FSMContext):
     objs = [o.strip() for o in m.text.split(",")]
@@ -1036,35 +1072,27 @@ async def info_objects(m: Message, state: FSMContext):
     await m.answer("\n\n".join(lines) if lines else "—", reply_markup=main_kb())
     await state.clear()
 
-# ========== WEBHOOK HANDLER & APP SHUTDOWN CLEANUP ==========
+# ========== WEBHOOK HANDLER & SHUTDOWN ==========
 async def webhook_handler(request: web.Request):
-    """
-    Proper async webhook handler:
-    - reads JSON payload
-    - schedules dp.feed_webhook_update(bot, data) in background to return response fast
-    """
     try:
         data = await request.json()
     except Exception:
         return web.Response(status=400, text="invalid json")
-    # schedule processing; do not await here to keep webhook response fast
     asyncio.create_task(dp.feed_webhook_update(bot, data))
     return web.Response(text="ok")
 
 async def on_shutdown(app):
-    # close bot session to avoid "Unclosed connection" warnings
     try:
         await bot.session.close()
     except Exception:
         logger.exception("Error closing bot.session on shutdown")
 
-# ========== ЗАПУСК ==========
+# ========== MAIN ==========
 async def main():
     init_db()
     load_settings()
     dp.include_router(router)
 
-    # Установка команд бота
     commands = [
         BotCommand(command="start", description="Запуск бота"),
         BotCommand(command="addphoto", description="Добавить фото к объекту"),
@@ -1078,16 +1106,13 @@ async def main():
     except Exception:
         logger.exception("Failed to set bot commands")
 
-    # Запуск keepalive
     asyncio.create_task(keepalive())
 
-    # Настройка вебхука
     try:
         await bot.set_webhook(f"{WEBHOOK_URL}/webhook")
     except Exception:
         logger.exception("Failed to set webhook")
 
-    # Запуск сервера
     app = web.Application()
     app.router.add_post("/webhook", webhook_handler)
     app.on_cleanup.append(on_shutdown)
@@ -1097,7 +1122,6 @@ async def main():
     await site.start()
     logger.info(f"🚀 Бот запущен на порту {PORT}")
 
-    # Бесконечный цикл
     while True:
         await asyncio.sleep(3600)
 
@@ -1106,4 +1130,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Shutting down")
-
