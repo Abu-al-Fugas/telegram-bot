@@ -188,7 +188,9 @@ def main_kb():
     )
 
 def cancel_only_kb(user_id: int | None):
-    cancel_cb = f"cancel_{user_id}" if user_id else "cancel"
+    # Always include a suffix after "cancel_" for consistent parsing.
+    # If user_id is None, we will use an empty suffix (which handlers interpret as "no restriction")
+    cancel_cb = f"cancel_{user_id if user_id is not None else ''}"
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="❌ Отмена", callback_data=cancel_cb)]
     ])
@@ -286,9 +288,9 @@ def get_object_info(chat_id: int, object_id: str):
             if str(row[0]).strip() == str(object_id):
                 return {
                     "id": str(row[0]).strip(),
-                    "consumer": str(row[1]) if len(row) > 1 else "Н/Д",
-                    "object": str(row[2]) if len(row) > 2 else "Н/Д",
-                    "address": str(row[3]) if len(row) > 3 else "Н/Д",
+                    "consumer": str(row[1]) if len(row) > 1 and row[1] is not None else "Н/Д",
+                    "object": str(row[2]) if len(row) > 2 and row[2] is not None else "Н/Д",
+                    "address": str(row[3]) if len(row) > 3 and row[3] is not None else "Н/Д",
                 }
         return None
     except Exception as e:
@@ -592,19 +594,30 @@ async def add_confirm_yes(c: CallbackQuery, state: FSMContext):
 # ===== Cancel (universal) =====
 @router.callback_query(F.data.startswith("cancel_"))
 async def cancel_anywhere(c: CallbackQuery, state: FSMContext):
-    parts = c.data.split("_", 1)
-    if len(parts) < 2:
-        await safe_cq_answer(c, "Эта кнопка не для вас 😅", show_alert=True)
-        return
-    try:
-        user_id = int(parts[1])
-    except:
+    # expected formats: "cancel_{user_id}" or "cancel_" (empty suffix means no strict owner)
+    prefix = "cancel_"
+    if not c.data.startswith(prefix):
         await safe_cq_answer(c, "Эта кнопка не для вас 😅", show_alert=True)
         return
 
-    if c.from_user.id != user_id:
-        await safe_cq_answer(c, "Эта кнопка не для вас 😅", show_alert=True)
-        return
+    uid_str = c.data[len(prefix):]
+    if uid_str:
+        # Numeric user id expected
+        if not uid_str.isdigit():
+            # malformed -> show not for you
+            await safe_cq_answer(c, "Эта кнопка не для вас 😅", show_alert=True)
+            return
+        try:
+            user_id = int(uid_str)
+        except:
+            await safe_cq_answer(c, "Эта кнопка не для вас 😅", show_alert=True)
+            return
+        if c.from_user.id != user_id:
+            await safe_cq_answer(c, "Эта кнопка не для вас 😅", show_alert=True)
+            return
+    else:
+        # empty suffix -> no strict owner specified; allow any user to cancel
+        user_id = None
 
     await state.clear()
     try:
@@ -704,7 +717,7 @@ async def single_file_uploading(m: Message, state: FSMContext):
     file_id = m.photo[-1].file_id if m.photo else m.video.file_id if m.video else m.document.file_id
     cur["files"].append({"type": file_type, "file_id": file_id})
     await state.update_data(steps=steps)
-    # показать action клавиатуру "Выберите действие:"
+    # показать action клавиатуру "Выберите действие:" — обновлять всегда при добавлении файлов
     await _show_action_for_current_step(state, m.chat.id, step_i, m)
 
 @router.message(AddPhoto.uploading, (F.photo | F.video | F.document) & ~F.media_group_id)
@@ -720,10 +733,8 @@ async def single_file_addphoto(m: Message, state: FSMContext):
 
 # show "Выберите действие:" for current step in /photo flow
 async def _show_action_for_current_step(state: FSMContext, chat_id: int, step_i: int, context_msg: Message):
+    # We intentionally always refresh the action message when files arrive
     data = await state.get_data()
-    save_shown_for_step = data.get("save_shown_for_step", -1)
-    if save_shown_for_step == step_i:
-        return
     # delete previous step message if exists
     step_msg = data.get("step_msg")
     if step_msg:
@@ -806,7 +817,8 @@ async def save_callback(c: CallbackQuery, state: FSMContext):
             if route:
                 archive_chat_id = route["chat_id"]
                 archive_thread_id = route["thread_id"]
-                asyncio.create_task(_archive_and_notify(owner_id, obj, obj_name, steps_copy, archive_chat_id, archive_thread_id, c.from_user.full_name))
+                # pass work_chat_id so archive function can build full header using Excel
+                asyncio.create_task(_archive_and_notify(owner_id, obj, obj_name, steps_copy, work_chat_id, archive_chat_id, archive_thread_id, c.from_user.full_name))
             else:
                 logger.warning("No route for work_chat_id=%s thread=%s", work_chat_id, work_thread_id)
                 try:
@@ -868,7 +880,8 @@ async def save_callback(c: CallbackQuery, state: FSMContext):
         if route:
             archive_chat_id = route["chat_id"]
             archive_thread_id = route["thread_id"]
-            asyncio.create_task(_send_header_and_files_to_archive(obj, obj_name, files, archive_chat_id, archive_thread_id, c.from_user.full_name))
+            # include work_chat_id to get header info from Excel
+            asyncio.create_task(_send_header_and_files_to_archive(obj, obj_name, files, work_chat_id, archive_chat_id, archive_thread_id, c.from_user.full_name))
         else:
             logger.warning("No route for addphoto: work_chat_id=%s thread=%s", work_chat_id, work_thread_id)
             try:
@@ -884,10 +897,26 @@ async def save_callback(c: CallbackQuery, state: FSMContext):
         return
 
 # ========== BACKGROUND ARCHIVE & NOTIFY ==========
-async def _archive_and_notify(owner_id: int, obj: str, obj_name: str, steps: list, chat_id: int, thread_id: int, author: str):
+async def _archive_and_notify(owner_id: int, obj: str, obj_name: str, steps: list, work_chat_id: int, chat_id: int, thread_id: int, author: str):
+    """
+    Send header (built using Excel from work_chat_id) and then files grouped.
+    """
     try:
+        # Build header using get_object_info from work chat so it contains consumer/object/address
+        info = get_object_info(work_chat_id, obj)
+        if isinstance(info, dict) and "error" in info:
+            header_text = f"Объект #{obj}\n🏠 {obj_name}\n🙋🏻‍♂️ {author}"
+        elif info is None:
+            header_text = f"Объект #{obj}\n🏠 {obj_name}\n🙋🏻‍♂️ {author}"
+        else:
+            header_text = (
+                f"✅ #{info['id']}\n"
+                f"🏷️ {info['consumer']}\n"
+                f"🏢 {info['object']}\n"
+                f"📍 {info['address']}\n\n"
+                f"🙋 {author}"
+            )
         # Send header first
-        header_text = f"Объект #{obj}\n🏠 {obj_name}\n🙋🏻‍♂️ {author}"
         try:
             await safe_call(bot.send_message(chat_id, header_text, message_thread_id=thread_id))
         except Exception:
@@ -908,7 +937,6 @@ async def _archive_and_notify(owner_id: int, obj: str, obj_name: str, steps: lis
         if media_buffer:
             await safe_call(bot.send_media_group(chat_id, media_buffer, message_thread_id=thread_id))
         # notify user — removed per request (do not send notification to owner)
-        # (original code sent a message to owner_id here; it is intentionally removed)
     except Exception:
         logger.exception("Error during background archive")
         try:
@@ -917,9 +945,21 @@ async def _archive_and_notify(owner_id: int, obj: str, obj_name: str, steps: lis
             pass
 
 # helper: send header + provided files list to archive (used for addphoto single-step)
-async def _send_header_and_files_to_archive(obj: str, obj_name: str, files: list, chat_id: int, thread_id: int, author: str):
+async def _send_header_and_files_to_archive(obj: str, obj_name: str, files: list, work_chat_id: int, chat_id: int, thread_id: int, author: str):
     try:
-        header_text = f"Объект #{obj}\n🏠 {obj_name}\n🙋🏻‍♂️ {author}"
+        info = get_object_info(work_chat_id, obj)
+        if isinstance(info, dict) and "error" in info:
+            header_text = f"Объект #{obj}\n🏠 {obj_name}\n🙋🏻‍♂️ {author}"
+        elif info is None:
+            header_text = f"Объект #{obj}\n🏠 {obj_name}\n🙋🏻‍♂️ {author}"
+        else:
+            header_text = (
+                f"✅ #{info['id']}\n"
+                f"🏷️ {info['consumer']}\n"
+                f"🏢 {info['object']}\n"
+                f"📍 {info['address']}\n\n"
+                f"🙋 {author}"
+            )
         try:
             await safe_call(bot.send_message(chat_id, header_text, message_thread_id=thread_id))
         except Exception:
@@ -968,6 +1008,21 @@ async def video_uploading(m: Message, state: FSMContext):
         return
 
     try:
+        # send header first (so video appears after it)
+        info = get_object_info(work_chat_id, obj)
+        if isinstance(info, dict) and "error" in info:
+            header_text = f"Объект #{obj}\n🏠 {obj_name}\n🙋🏻‍♂️ {m.from_user.full_name}"
+        elif info is None:
+            header_text = f"Объект #{obj}\n🏠 {obj_name}\n🙋🏻‍♂️ {m.from_user.full_name}"
+        else:
+            header_text = (
+                f"✅ #{info['id']}\n"
+                f"🏷️ {info['consumer']}\n"
+                f"🏢 {info['object']}\n"
+                f"📍 {info['address']}\n\n"
+                f"🙋 {m.from_user.full_name}"
+            )
+        await safe_call(bot.send_message(archive_chat_id, header_text, message_thread_id=archive_thread_id))
         # отправка видео в архив сразу
         await safe_call(bot.send_video(archive_chat_id, file_id, message_thread_id=archive_thread_id))
     except Exception as e:
