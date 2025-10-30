@@ -74,19 +74,19 @@ VIDEO_STEP = "🎥 Видео герметичности соединений"
 # ========== БАЗА ДАННЫХ ==========
 def init_db():
     with closing(sqlite3.connect(DB_PATH)) as conn:
-        conn.execute("""CREATE TABLE IF NOT EXISTS files(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            object_id TEXT, step TEXT, kind TEXT, file_id TEXT,
-            author TEXT, created_at TEXT
+        conn.execute("""CREATE TABLE IF NOT EXISTS files(\
+            id INTEGER PRIMARY KEY AUTOINCREMENT,\
+            object_id TEXT, step TEXT, kind TEXT, file_id TEXT,\
+            author TEXT, created_at TEXT\
         )""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS completed(
-            object_id TEXT PRIMARY KEY,
-            author TEXT,
-            completed_at TEXT
+        conn.execute("""CREATE TABLE IF NOT EXISTS completed(\
+            object_id TEXT PRIMARY KEY,\
+            author TEXT,\
+            completed_at TEXT\
         )""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS settings(
-            key TEXT PRIMARY KEY,
-            value TEXT
+        conn.execute("""CREATE TABLE IF NOT EXISTS settings(\
+            key TEXT PRIMARY KEY,\
+            value TEXT\
         )""")
         conn.commit()
 
@@ -189,8 +189,8 @@ def main_kb():
 
 def cancel_only_kb(user_id: int | None):
     cancel_cb = f"cancel_{user_id}" if user_id else "cancel"
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Отмена", callback_data=cancel_cb)]
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="❌ Отмена", callback_data=cancel_cb)]
     ])
 
 def action_kb(user_id: int | None):
@@ -434,7 +434,7 @@ async def cmd_result(m: Message):
                  fname = local_excel_map.get(group_id) 
                  if fname:
                      group_name = f"{group_id} ({fname})"
-            
+             
             lines.append(f"\n📁 Группа: {group_name}")
             lines.extend(items)
 
@@ -732,7 +732,7 @@ async def _show_action_for_current_step(state: FSMContext, chat_id: int, step_i:
             await safe_call(bot.delete_message(stored_chat, stored_mid))
         except Exception:
             logger.debug("Could not delete previous step message", exc_info=True)
-    # send action message "Выберите действие:"
+    # send action message "Выберите действие:" 
     owner_id = data.get("owner_id")
     work_thread_id = data.get("work_thread_id")
     try:
@@ -907,11 +907,8 @@ async def _archive_and_notify(owner_id: int, obj: str, obj_name: str, steps: lis
                     media_buffer = []
         if media_buffer:
             await safe_call(bot.send_media_group(chat_id, media_buffer, message_thread_id=thread_id))
-        # notify user
-        try:
-            await safe_call(bot.send_message(owner_id, "✅ Фотографии и файлы (8 шагов) успешно загружены в Архив. Отправьте, пожалуйста, видео герметичности."))
-        except Exception:
-            logger.exception("Failed to notify owner after archive")
+        # notify user — removed per request (do not send notification to owner)
+        # (original code sent a message to owner_id here; it is intentionally removed)
     except Exception:
         logger.exception("Error during background archive")
         try:
@@ -1071,4 +1068,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Shutting down")
-
