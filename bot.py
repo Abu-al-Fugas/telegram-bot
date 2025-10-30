@@ -367,14 +367,108 @@ async def cmd_result(m: Message):
     if not rows:
         await m.answer("📋 Пока нет завершённых объектов (через /photo).", reply_markup=main_kb())
         return
-    lines = ["✅ Обработанные объекты (сценарий /photo):"]
-    for oid, author, ts in rows:
+
+    is_private_chat = m.chat.type == "private"
+    current_group_chat_id = None
+    
+    if not is_private_chat:
+        # Проверяем, привязан ли Excel к этому групповому чату
+        filename = get_excel_filename_for_chat(m.chat.id)
+        if filename:
+            current_group_chat_id = str(m.chat.id) # Cохраняем как строку для согласованности
+        else:
+            # Если команда в группе, но БЕЗ Excel, ведем себя как в ЛС (показываем все)
+            is_private_chat = True 
+
+    # --- Построение карты {object_id -> group_id} ---
+    # Это делается один раз за команду, читая все Excel-файлы.
+    logger.info("Построение карты object_id -> group_id для /result...")
+    obj_to_group_map = {}
+    local_excel_map = stringify_keys(EXCEL_MAP) # Гарантируем строковые ключи
+    
+    for chat_id_str, filename in local_excel_map.items():
         try:
-            ts_h = datetime.fromisoformat(ts).strftime("%d.%m.%Y %H:%M")
-        except:
-            ts_h = ts
-        lines.append(f"• #{oid} — {author} ({ts_h})")
-    await m.answer("\n".join(lines), reply_markup=main_kb())
+            wb = openpyxl.load_workbook(filename, read_only=True, data_only=True)
+            sh = wb.active
+            for row in sh.iter_rows(min_row=2, values_only=True):
+                if row and row[0]: # Проверяем, что есть ID
+                    obj_id = str(row[0]).strip()
+                    if obj_id:
+                        obj_to_group_map[obj_id] = chat_id_str
+        except Exception as e:
+            logger.warning("Ошибка при чтении %s для /result: %s", filename, e)
+    logger.info("Карта для /result построена.")
+    # --- Карта построена ---
+
+    lines = ["✅ Обработанные объекты:"]
+    
+    # --- Логика для приватного чата (группировка) ---
+    if is_private_chat:
+        objects_by_group = {} # { "group_id_str": [ "строка_объекта", ... ] }
+        
+        for oid, author, ts in rows:
+            try:
+                ts_h = datetime.fromisoformat(ts).strftime("%d.%m.%Y %H:%M")
+            except:
+                ts_h = ts
+            
+            # Находим группу для объекта
+            group_id = obj_to_group_map.get(oid) or "Неизвестная группа" 
+            
+            if group_id not in objects_by_group:
+                objects_by_group[group_id] = []
+            objects_by_group[group_id].append(f"• #{oid} — {author} ({ts_h})")
+
+        if not objects_by_group:
+             await m.answer("📋 Пока нет завершённых объектов (через /photo).", reply_markup=main_kb())
+             return
+
+        # Сортируем группы (по ID) для предсказуемого порядка
+        sorted_group_ids = sorted(objects_by_group.keys())
+
+        for group_id in sorted_group_ids:
+            items = objects_by_group[group_id]
+            group_name = group_id
+            if group_id != "Неизвестная группа":
+                 # Пытаемся получить имя файла для наглядности
+                 fname = local_excel_map.get(group_id) 
+                 if fname:
+                     group_name = f"{group_id} ({fname})"
+            
+            lines.append(f"\n📁 Группа: {group_name}")
+            lines.extend(items)
+
+    # --- Логика для группового чата (фильтрация) ---
+    else:
+        filtered_items = []
+        for oid, author, ts in rows:
+            group_id = obj_to_group_map.get(oid)
+            
+            # Показываем только если объект принадлежит ТЕКУЩЕЙ группе
+            if group_id == current_group_chat_id:
+                try:
+                    ts_h = datetime.fromisoformat(ts).strftime("%d.%m.%Y %H:%M")
+                except:
+                    ts_h = ts
+                filtered_items.append(f"• #{oid} — {author} ({ts_h})")
+        
+        if not filtered_items:
+            await m.answer("📋 В этой группе пока нет завершённых объектов (через /photo).", reply_markup=main_kb())
+            return
+        
+        lines.extend(filtered_items)
+    
+    # --- Отправка ответа (с разбивкой, если нужно) ---
+    message_text = "\n".join(lines)
+    if len(message_text) > 4096:
+        logger.warning("Сообщение /result слишком длинное (%d), будет разбито.", len(message_text))
+        # Отправляем первую часть с клавиатурой
+        await m.answer(message_text[:4096], reply_markup=main_kb())
+        # Отправляем остальные части без
+        for i in range(4096, len(message_text), 4096):
+            await m.answer(message_text[i:i+4096])
+    else:
+        await m.answer(message_text, reply_markup=main_kb())
 
 # ========== CHECK OBJECT & CONFIRM ==========
 @router.message(Upload.waiting_object)
@@ -728,7 +822,6 @@ async def save_callback(c: CallbackQuery, state: FSMContext):
                 sent = await safe_call(bot.send_message(data["work_chat_id"], VIDEO_STEP, reply_markup=cancel_only_kb(owner_id), message_thread_id=data.get("work_thread_id")))
                 if sent:
                     await state.update_data(step_msg=(sent.chat.id, sent.message_id))
-            await safe_cq_answer(c, "✅ Сохранено — отправка фотографий в архив запущена в фоне. Теперь пришлите видео (оно отправится автоматически).")
             return
         # else show next step initial message (only Cancel)
         next_step = steps[step_i]["name"]
@@ -978,3 +1071,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Shutting down")
+
