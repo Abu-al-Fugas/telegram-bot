@@ -546,7 +546,7 @@ async def photo_confirm_yes(c: CallbackQuery, state: FSMContext):
         return
 
     data = await state.get_data()
-    # verify topic still allowed (race safety)
+    # verify topic still allowed
     if not is_topic_allowed(data.get("work_chat_id"), data.get("work_thread_id")):
         await safe_cq_answer(c, "⚠️ Тема больше не привязана к маршруту. Операция отменена.", show_alert=True)
         await state.clear()
@@ -899,7 +899,7 @@ async def save_callback(c: CallbackQuery, state: FSMContext):
 # ========== BACKGROUND ARCHIVE & NOTIFY ==========
 async def _archive_and_notify(owner_id: int, obj: str, obj_name: str, steps: list, work_chat_id: int, chat_id: int, thread_id: int, author: str):
     """
-    Send header (built using Excel from work_chat_id) and then files grouped, as a reply to the header.
+    Send header (built using Excel from work_chat_id) and then files grouped.
     """
     try:
         # Build header using get_object_info from work chat so it contains consumer/object/address
@@ -916,14 +916,12 @@ async def _archive_and_notify(owner_id: int, obj: str, obj_name: str, steps: lis
                 f"📍 {info['address']}\n\n"
                 f"🙋 {author}"
             )
-        # 1) Send header first and save message_id
-        header_msg = await safe_call(bot.send_message(chat_id, header_text, message_thread_id=thread_id))
-        
-        # 2) Small pause for timestamp
-        await asyncio.sleep(1.2)
-        
-        # 3) then send files grouped (by 10) as a reply to the header
-        reply_to = header_msg.message_id if header_msg else None
+        # Send header first
+        try:
+            await safe_call(bot.send_message(chat_id, header_text, message_thread_id=thread_id))
+        except Exception:
+            logger.exception("Failed to send header to archive")
+        # then send files grouped (by 10)
         media_buffer = []
         for step in steps:
             for f in step.get("files", []):
@@ -934,10 +932,10 @@ async def _archive_and_notify(owner_id: int, obj: str, obj_name: str, steps: lis
                 else:
                     media_buffer.append(InputMediaDocument(media=f["file_id"]))
                 if len(media_buffer) >= 10:
-                    await safe_call(bot.send_media_group(chat_id, media_buffer, message_thread_id=thread_id, reply_to_message_id=reply_to))
+                    await safe_call(bot.send_media_group(chat_id, media_buffer, message_thread_id=thread_id))
                     media_buffer = []
         if media_buffer:
-            await safe_call(bot.send_media_group(chat_id, media_buffer, message_thread_id=thread_id, reply_to_message_id=reply_to))
+            await safe_call(bot.send_media_group(chat_id, media_buffer, message_thread_id=thread_id))
         # notify user — removed per request (do not send notification to owner)
     except Exception:
         logger.exception("Error during background archive")
@@ -962,14 +960,10 @@ async def _send_header_and_files_to_archive(obj: str, obj_name: str, files: list
                 f"📍 {info['address']}\n\n"
                 f"🙋 {author}"
             )
-        # 1) Send header first and save message_id
-        header_msg = await safe_call(bot.send_message(chat_id, header_text, message_thread_id=thread_id))
-        
-        # 2) Small pause for timestamp
-        await asyncio.sleep(1.2)
-        
-        # 3) then send files grouped (by 10) as a reply to the header
-        reply_to = header_msg.message_id if header_msg else None
+        try:
+            await safe_call(bot.send_message(chat_id, header_text, message_thread_id=thread_id))
+        except Exception:
+            logger.exception("Failed to send header to archive (addphoto)")
         media_buffer = []
         for f in files:
             if f["type"] == "photo":
@@ -979,10 +973,10 @@ async def _send_header_and_files_to_archive(obj: str, obj_name: str, files: list
             else:
                 media_buffer.append(InputMediaDocument(media=f["file_id"]))
             if len(media_buffer) >= 10:
-                await safe_call(bot.send_media_group(chat_id, media_buffer, message_thread_id=thread_id, reply_to_message_id=reply_to))
+                await safe_call(bot.send_media_group(chat_id, media_buffer, message_thread_id=thread_id))
                 media_buffer = []
         if media_buffer:
-            await safe_call(bot.send_media_group(chat_id, media_buffer, message_thread_id=thread_id, reply_to_message_id=reply_to))
+            await safe_call(bot.send_media_group(chat_id, media_buffer, message_thread_id=thread_id))
     except Exception:
         logger.exception("Error sending addphoto files to archive")
 
@@ -1014,7 +1008,7 @@ async def video_uploading(m: Message, state: FSMContext):
         return
 
     try:
-        # Build header
+        # send header first (so video appears after it)
         info = get_object_info(work_chat_id, obj)
         if isinstance(info, dict) and "error" in info:
             header_text = f"Объект #{obj}\n🏠 {obj_name}\n🙋🏻‍♂️ {m.from_user.full_name}"
@@ -1028,17 +1022,9 @@ async def video_uploading(m: Message, state: FSMContext):
                 f"📍 {info['address']}\n\n"
                 f"🙋 {m.from_user.full_name}"
             )
-        
-        # 1) Send header first and save message_id
-        header_msg = await safe_call(bot.send_message(archive_chat_id, header_text, message_thread_id=archive_thread_id))
-        
-        # 2) Small pause for timestamp
-        await asyncio.sleep(1.2)
-        
-        # 3) Send video as a reply to the header
-        reply_to = header_msg.message_id if header_msg else None
-        await safe_call(bot.send_video(archive_chat_id, file_id, message_thread_id=archive_thread_id, reply_to_message_id=reply_to))
-        
+        await safe_call(bot.send_message(archive_chat_id, header_text, message_thread_id=archive_thread_id))
+        # отправка видео в архив сразу
+        await safe_call(bot.send_video(archive_chat_id, file_id, message_thread_id=archive_thread_id))
     except Exception as e:
         logger.exception("Error sending video to archive: %s", e)
         await m.answer(f"⚠️ Ошибка при отправке видео в архив: {e}")
