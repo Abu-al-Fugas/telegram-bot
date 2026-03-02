@@ -1,84 +1,78 @@
 import os
+import asyncio
 import logging
 import yt_dlp
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import CommandStart
+from aiogram.types import Message
 
-# Токен берём из переменных окружения Render
 TOKEN = os.getenv("TOKEN")
 
 if not TOKEN:
-    raise ValueError("Не задан TOKEN в переменных окружения")
+    raise ValueError("TOKEN не задан в переменных окружения")
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
 
 DOWNLOAD_FOLDER = "downloads"
 
 if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
 
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Привет! Отправь ссылку на видео с YouTube или Instagram."
-    )
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
 
 
-def download_video(url):
+@dp.message(CommandStart())
+async def start_handler(message: Message):
+    await message.answer("Привет! Пришли ссылку на YouTube или Instagram видео.")
+
+
+def download_video(url: str) -> str:
     ydl_opts = {
         "outtmpl": os.path.join(DOWNLOAD_FOLDER, "%(title).80s.%(ext)s"),
-        "format": "mp4",
+        "format": "bestvideo+bestaudio/best",
+        "merge_output_format": "mp4",
         "noplaylist": True,
         "quiet": True,
-        "merge_output_format": "mp4",
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-        return filename
+        return ydl.prepare_filename(info)
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text.strip()
+@dp.message()
+async def handle_message(message: Message):
+    url = message.text.strip()
 
     if not url.startswith("http"):
-        await update.message.reply_text("Пожалуйста, отправь корректную ссылку.")
+        await message.answer("Отправь корректную ссылку.")
         return
 
-    await update.message.reply_text("Скачиваю видео...")
+    await message.answer("Скачиваю видео...")
 
     try:
-        file_path = download_video(url)
+        loop = asyncio.get_running_loop()
+        file_path = await loop.run_in_executor(None, download_video, url)
 
-        # Telegram ограничивает размер файла 50MB для обычных ботов
         if os.path.getsize(file_path) > 50 * 1024 * 1024:
-            await update.message.reply_text("Файл слишком большой (больше 50MB).")
+            await message.answer("Видео больше 50MB. Telegram не позволяет отправить.")
             os.remove(file_path)
             return
 
         with open(file_path, "rb") as video:
-            await update.message.reply_video(video=video)
+            await message.answer_video(video)
 
         os.remove(file_path)
 
     except Exception as e:
         logging.error(str(e))
-        await update.message.reply_text("Ошибка при скачивании видео.")
+        await message.answer("Ошибка при скачивании видео.")
 
 
-def main():
-    app = ApplicationBuilder().token(TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    print("Бот запущен...")
-    app.run_polling()
+async def main():
+    await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
